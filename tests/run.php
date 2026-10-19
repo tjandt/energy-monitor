@@ -10,6 +10,7 @@ ini_set('display_errors', '1');
 
 require_once __DIR__ . '/../includes/EnergyService.php';
 require_once __DIR__ . '/../includes/WeatherImporter.php';
+require_once __DIR__ . '/../includes/Auth.php';
 
 $config = require __DIR__ . '/../config.php';
 Config::override($config);
@@ -177,6 +178,114 @@ $dash = $svc->getDashboard('week');
 check('Dashboard leer: 4 Zähler', count($dash) === 4);
 check('Dashboard leer: Schätzung 0', $dash['Strom']['estimate'] == 0 && $dash['Strom']['last_reading'] === null);
 throwsA('Dashboard: ungültige Granularität', InvalidArgumentException::class, fn() => $svc->getDashboard('day'));
+
+// ---------------------------------------------------------------- Zählerstände bearbeiten/löschen
+$pdo = newDb();
+seed($pdo, 'Strom', [['2025-01-01 08:00:00', 1000], ['2025-02-01 08:00:00', 1100], ['2025-03-01 08:00:00', 1200]]);
+$svc = new EnergyService($pdo, $config);
+$list = $svc->getReadings('Strom', 2, 0);
+check('Liste: neueste zuerst, Limit, Total', count($list['readings']) === 2 && $list['total'] === 3 && $list['readings'][0]['reading_date'] === '2025-03-01 08:00:00');
+$midId = (int) $svc->getReadings('Strom', 10)['readings'][1]['id'];
+$svc->saveReading('Strom', '2025-02-01', '08:00', '1150', false, $midId);
+check('Ändern: Wert aktualisiert, keine Duplikat-Meldung für sich selbst', (float) $pdo->query("SELECT counter_value FROM meter_readings WHERE id = $midId")->fetchColumn() === 1150.0);
+near('Ändern: Cache aktualisiert (Verbrauch Jan→Feb)', (new ReadingRepository($pdo))->consumption('Strom', strtotime('2025-01-01 08:00'), strtotime('2025-02-01 08:00')), 150);
+throwsA('Ändern: Plausibilität greift', ImplausibleReadingException::class, fn() => $svc->saveReading('Strom', '2025-02-01', '08:00', '1300', false, $midId));
+throwsA('Ändern: unbekannte ID', InvalidArgumentException::class, fn() => $svc->saveReading('Strom', '2025-02-01', '08:00', '1', true, 9999));
+$svc->saveReading('Strom', '2025-02-10', '08:00', '1160', false, $midId);
+check('Ändern: Datum verschoben', $pdo->query("SELECT reading_date FROM meter_readings WHERE id = $midId")->fetchColumn() === '2025-02-10 08:00:00');
+$svc->deleteReading($midId);
+check('Löschen', $svc->getReadings('Strom')['total'] === 2 && $svc->getLastReading('Strom')['reading_date'] === '2025-03-01 08:00:00');
+throwsA('Löschen: unbekannte ID', InvalidArgumentException::class, fn() => $svc->deleteReading($midId));
+
+// ---------------------------------------------------------------- Kostenprognose im Chart
+$pdo = newDb();
+$st = $pdo->prepare('INSERT INTO meter_readings (utility_type, reading_date, counter_value) VALUES (?,?,?)');
+$v = 0; $pdo->beginTransaction();
+for ($d = new DateTime('2023-01-01'); $d <= new DateTime('2025-03-31'); $d->modify('+1 day')) { $st->execute(['Strom', $d->format('Y-m-d 00:00:00'), $v]); $v += 10; }
+$pdo->commit();
+$svc = new EnergyService($pdo, $config);
+$svc->saveTariff(['utility_type' => 'Strom', 'valid_from' => '2023-01-01', 'price_per_unit' => '30', 'base_price_monthly' => '0']);
+$c = $svc->getChartData('Strom', 'custom', 'cost', '2025-01-01', '2025-03-30', true);
+check('Kostenprognose vorhanden', count($c['forecast_values']) === 6 && $c['unit'] === '€', json_encode($c['forecast_values']));
+near('Kostenprognose = 70 kWh/Woche × 0,30 €', $c['forecast_values'][1], 21.0, 0.5);
+
+// ---------------------------------------------------------------- Gradtage / Witterungsbereinigung
+$pdo = newDb();
+$st = $pdo->prepare('INSERT INTO meter_readings (utility_type, reading_date, counter_value) VALUES (?,?,?)');
+$w = $pdo->prepare('INSERT INTO weather_data (date, avg_temp) VALUES (?,?)');
+$pdo->beginTransaction();
+$vv = 0;
+// Vorjahr: 0 °C -> 20 Gt/Tag, 100 kWh/Tag (5 kWh/Gt); dieses Jahr: kälter (-5 °C -> 25 Gt/Tag), 150 kWh/Tag (6 kWh/Gt)
+$thisYear = (int) date('Y');
+for ($d = new DateTime(($thisYear - 1) . '-01-01'); $d <= new DateTime('now'); $d->modify('+1 day')) {
+	$prevYear = (int) $d->format('Y') < $thisYear;
+	$st->execute(['Waerme', $d->format('Y-m-d 00:00:00'), $vv]);
+	$vv += $prevYear ? 100 : 150;
+	$w->execute([$d->format('Y-m-d'), $prevYear ? 0.0 : -5.0]);
+}
+$pdo->commit();
+$cfgHeat = $config; $cfgHeat['utilities']['Waerme']['degree_day_adjust'] = true;
+$svc = new EnergyService($pdo, $cfgHeat);
+$cmp = $svc->getPeriodComparison('Waerme', 'year');
+check('Gradtage: Bereinigung vorhanden', is_array($cmp['weather_adjusted']), json_encode($cmp['weather_adjusted']));
+if (is_array($cmp['weather_adjusted'])) {
+	near('Gradtage: spezifisch dieses Jahr 6 kWh/Gt', $cmp['weather_adjusted']['specific'], 6.0, 0.05);
+	near('Gradtage: spezifisch Vorjahr 5 kWh/Gt', $cmp['weather_adjusted']['specific_prev'], 5.0, 0.05);
+	near('Gradtage: +20 % bereinigt', $cmp['weather_adjusted']['change_pct'], 20.0, 0.5);
+	check('Gradtage: Trend bad', $cmp['weather_adjusted']['trend'] === 'bad');
+}
+$cmpStrom = $svc->getPeriodComparison('Strom', 'year');
+check('Gradtage: Strom ohne Bereinigung', $cmpStrom['weather_adjusted'] === null);
+$dd = new DegreeDays($pdo, $config['degree_days']);
+near('Gradtage: 10 Tage à 0 °C = 200 Gt', $dd->between(new DateTime(($thisYear - 1) . '-01-01'), new DateTime(($thisYear - 1) . '-01-11')), 200);
+$tt = $pdo->query("SELECT COUNT(*) FROM weather_data")->fetchColumn();
+check('Gradtage: ohne Wetterdaten null', $dd->between(new DateTime('1999-01-01'), new DateTime('1999-01-11')) === null);
+$pdo->exec('DELETE FROM weather_data');
+check('Bereinigung ohne Wetterdaten = null', (new EnergyService($pdo, $cfgHeat))->getPeriodComparison('Waerme', 'year')['weather_adjusted'] === null);
+
+// ---------------------------------------------------------------- Jahresvergleich
+$pdo = newDb();
+$st = $pdo->prepare('INSERT INTO meter_readings (utility_type, reading_date, counter_value) VALUES (?,?,?)');
+$v = 0; $pdo->beginTransaction();
+for ($d = new DateTime(($thisYear - 2) . '-01-01'); $d <= new DateTime('now'); $d->modify('+1 day')) { $st->execute(['Strom', $d->format('Y-m-d 00:00:00'), $v]); $v += 10; }
+$pdo->commit();
+$svc = new EnergyService($pdo, $config);
+$yc = $svc->getYearComparison('Strom', 'usage', false);
+$feb = 10 * (int) date('t', strtotime(($thisYear - 2) . '-02-01'));
+check('Jahresvergleich: 3 Jahre, 12 Labels', count($yc['series']) === 3 && count($yc['labels']) === 12 && $yc['labels'][2] === 'Mär');
+near('Jahresvergleich: Januar = 310', $yc['series'][0]['values'][0], 310);
+near('Jahresvergleich: Februar Vorvorjahr', $yc['series'][0]['values'][1], $feb);
+check('Jahresvergleich: laufender Monat leer', end($yc['series'])['values'][(int) date('n') - 1] === null && end($yc['series'])['current'] === true);
+$yk = $svc->getYearComparison('Strom', 'usage', true);
+near('Jahresvergleich kumuliert: Ende Februar', $yk['series'][0]['values'][1], 310 + $feb);
+check('Jahresvergleich kumuliert: Jahr ohne Vollabdeckung fehlt nicht', count($yk['series']) === 3);
+$svc->saveTariff(['utility_type' => 'Strom', 'valid_from' => '2020-01-01', 'price_per_unit' => '10', 'base_price_monthly' => '100']);
+$ykc = $svc->getYearComparison('Strom', 'cost', true);
+near('Jahresvergleich Kosten kumuliert: Jan = 310×0,10 + 1,00', $ykc['series'][0]['values'][0], 32.0, 0.01);
+check('Jahresvergleich ohne Daten', (new EnergyService(newDb(), $config))->getYearComparison('Strom')['series'] === []);
+
+// ---------------------------------------------------------------- Auth
+$hash = password_hash('geheim', PASSWORD_DEFAULT);
+check('Auth: richtiges Passwort', Auth::verify('geheim', $hash));
+check('Auth: falsches Passwort', !Auth::verify('falsch', $hash));
+check('Auth: leerer Hash lehnt alles ab', !Auth::verify('', ''));
+$authDir = sys_get_temp_dir() . '/em_auth_test_' . getmypid();
+mkdir($authDir);
+Auth::$stateDir = $authDir;
+$authCfg = $config; $authCfg['auth'] = ['enabled' => true, 'password_hash' => $hash, 'max_attempts' => 3, 'lockout_minutes' => 1, 'session_hours' => 1];
+Config::override($authCfg);
+check('Auth: aktiviert', Auth::enabled());
+for ($i = 0; $i < 3; $i++) Auth::recordFailure('1.2.3.4');
+check('Auth: Sperre nach 3 Fehlversuchen', Auth::lockedForSeconds('1.2.3.4') > 0);
+check('Auth: andere IP nicht gesperrt', Auth::lockedForSeconds('5.6.7.8') === 0);
+check('Auth: Login während Sperre abgelehnt', str_contains((string) Auth::login('geheim', '1.2.3.4'), 'Zu viele'));
+Auth::clearFailures('1.2.3.4');
+check('Auth: Sperre aufgehoben', Auth::lockedForSeconds('1.2.3.4') === 0);
+$authCfg['auth']['password_hash'] = '';
+Config::override($authCfg);
+check('Auth: fehlender Hash -> Fehlermeldung (fail closed)', str_contains((string) Auth::login('x', '9.9.9.9'), 'Kein Passwort-Hash'));
+array_map('unlink', glob("$authDir/*")); rmdir($authDir);
+Config::override($config);
 
 // ---------------------------------------------------------------- Wetter-Parser
 $csv = "STATIONS_ID;MESS_DATUM;QN_3;TMK;TNK;TXK;eor\n02444;20240101;10;3.5;1.0;6.2;eor\n02444;20240102;10;-999;-999;-999;eor\n02444;20100101;10;1.0;0;2;eor\n";

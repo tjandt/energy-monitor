@@ -5,6 +5,8 @@ class EnergyApp {
 		this.state = {
 			selectedType: 'Strom',
 			dashboardGranularity: 'month', // week | month | year
+			chartView: 'timeline',         // timeline | years (Jahresvergleich)
+			cumulative: false,             // nur Jahresvergleich
 			chartPeriod: 'year',           // last_week | last_month | year | custom
 			chartMode: 'usage',            // usage | cost
 			showForecast: false,
@@ -14,8 +16,10 @@ class EnergyApp {
 		this.labels = {};        // Typ -> Anzeigename (aus dem Dashboard)
 		this.seq = { dashboard: 0, chart: 0 }; // verwirft veraltete Antworten bei schnellem Umschalten
 		this.readingModal = EM.modal('readingModal');
+		this.readingsModal = EM.modal('readingsModal');
+		this.readingsPaging = { type: null, offset: 0, pageSize: 25 };
 
-		EM.initTheme(() => this.lastChartData && this.renderChart(this.lastChartData));
+		EM.initTheme(() => this.lastChartData && (this.state.chartView === 'years' ? this.renderYearComparison(this.lastChartData) : this.renderChart(this.lastChartData)));
 		this.bindStaticEvents();
 		this.loadDashboard();
 		this.loadChart();
@@ -31,6 +35,20 @@ class EnergyApp {
 		$('modalClose').addEventListener('click', () => this.readingModal.close());
 		$('modalCancel').addEventListener('click', () => this.readingModal.close());
 		$('readingForm').addEventListener('submit', (e) => this.saveReading(e));
+		$('readingsBtn').addEventListener('click', () => this.openReadings(this.state.selectedType));
+		$('readingsClose').addEventListener('click', () => this.readingsModal.close());
+		$('readingsType').addEventListener('change', (e) => this.loadReadings(e.target.value, true));
+		$('readingsMore').addEventListener('click', () => this.loadReadings(this.readingsPaging.type, false));
+		$('readingsBody').addEventListener('click', (e) => {
+			const btn = e.target.closest('button[data-action]');
+			if (!btn) return;
+			if (btn.dataset.action === 'edit') this.editReading(btn.dataset.id);
+			if (btn.dataset.action === 'delete') this.deleteReading(btn.dataset.id);
+		});
+		$('cumulativeCheckbox').addEventListener('change', (e) => {
+			this.state.cumulative = e.target.checked;
+			this.loadChart();
+		});
 		$('goCustomRange').addEventListener('click', () => this.loadChart());
 		$('forecastCheckbox').addEventListener('change', (e) => {
 			this.state.showForecast = e.target.checked;
@@ -38,6 +56,11 @@ class EnergyApp {
 		});
 
 		this.bindSegmented('dashGranularity', (v) => { this.state.dashboardGranularity = v; this.loadDashboard(); });
+		this.bindSegmented('chartView', (v) => {
+			this.state.chartView = v;
+			this.updateChartControls();
+			this.loadChart();
+		});
 		this.bindSegmented('chartPeriod', (v) => {
 			this.state.chartPeriod = v;
 			$('customRange').classList.toggle('visible', v === 'custom');
@@ -88,6 +111,7 @@ class EnergyApp {
 		const grid = document.getElementById('dashboard');
 		grid.innerHTML = Object.entries(data).map(([type, item]) => {
 			this.labels[type] = item.label;
+			(this.units ||= {})[type] = item.unit;
 			return this.cardHtml(type, item, granLabel);
 		}).join('');
 	}
@@ -131,7 +155,19 @@ class EnergyApp {
 				<div class="card-divider"></div>
 				<div class="compare-label" style="margin-bottom:6px">Vergleich (${granLabel})</div>
 				<div class="compare-row">${compareHtml}</div>
+				${this.weatherAdjustedHtml(item)}
 			</div>`;
+	}
+
+	weatherAdjustedHtml(item) {
+		const w = item.weather_adjusted;
+		if (!w) return '';
+		const sign = w.change_pct > 0 ? '+' : '';
+		const cls = w.trend === 'good' ? 'good' : w.trend === 'bad' ? 'bad' : '';
+		return `<div class="weather-adj" title="Verbrauch je Gradtag (VDI 3807), bisheriger Verlauf der Periode ggü. gleichem Zeitabschnitt im Vorjahr">
+			🌡️ Witterungsbereinigt: <strong class="${cls}">${sign}${EM.fmt(w.change_pct)} %</strong> ggü. Vorjahr
+			(${EM.fmt(w.specific, 2)} vs. ${EM.fmt(w.specific_prev, 2)} ${EM.escape(w.unit)}; ${w.gt} vs. ${w.gt_prev} Gt)
+		</div>`;
 	}
 
 	trendText(trend) {
@@ -147,7 +183,19 @@ class EnergyApp {
 	// ------------------------------------------------------------------
 	// Chart (historische Verläufe)
 	// ------------------------------------------------------------------
+	/** Zeitraum-/Prognose-Bedienelemente passen zur gewählten Ansicht. */
+	updateChartControls() {
+		const years = this.state.chartView === 'years';
+		const $ = (id) => document.getElementById(id);
+		$('chartPeriod').classList.toggle('d-none', years);
+		$('customRange').classList.toggle('visible', !years && this.state.chartPeriod === 'custom');
+		$('forecastToggle').classList.toggle('d-none', years);
+		$('cumulativeToggle').classList.toggle('d-none', !years);
+	}
+
 	async loadChart() {
+		if (this.state.chartView === 'years') return this.loadYearComparison();
+
 		const params = {
 			type: this.state.selectedType,
 			period: this.state.chartPeriod,
@@ -174,6 +222,80 @@ class EnergyApp {
 		this.renderChart(data);
 	}
 
+	async loadYearComparison() {
+		const seq = ++this.seq.chart;
+		let data;
+		try {
+			data = await EM.api('get_year_comparison', { params: {
+				type: this.state.selectedType,
+				mode: this.state.chartMode,
+				cumulative: this.state.cumulative ? '1' : '0',
+			} });
+		} catch (e) {
+			if (seq === this.seq.chart) EM.toast('Fehler beim Laden des Jahresvergleichs: ' + e.message);
+			return;
+		}
+		if (seq !== this.seq.chart) return;
+
+		this.lastChartData = data;
+		this.renderYearComparison(data);
+	}
+
+	chartTheme() {
+		const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+		return {
+			isDark,
+			gridColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+			textColor: isDark ? '#98989D' : '#86868B',
+		};
+	}
+
+	renderYearComparison(data) {
+		const ctx = document.getElementById('mainChart').getContext('2d');
+		this.chart?.destroy();
+		const { gridColor, textColor } = this.chartTheme();
+		const main = data.color || '#0071E3';
+
+		// aktuelles Jahr kräftig, ältere Jahre blasser und gestrichelt
+		const n = data.series.length;
+		const datasets = data.series.map((s, i) => {
+			const age = n - 1 - i;
+			const color = age === 0 ? main : this.hexToRgba(main, age === 1 ? 0.6 : 0.35);
+			return {
+				label: String(s.year),
+				data: s.values,
+				borderColor: color,
+				backgroundColor: color,
+				borderWidth: age === 0 ? 3 : 2,
+				borderDash: age === 0 ? [] : [age === 1 ? 6 : 2, 4],
+				pointRadius: age === 0 ? 3 : 0,
+				pointHoverRadius: 5,
+				tension: 0.3,
+				spanGaps: false,
+			};
+		});
+
+		this.chart = new Chart(ctx, {
+			type: 'line',
+			data: { labels: data.labels, datasets },
+			options: {
+				responsive: true,
+				maintainAspectRatio: false,
+				interaction: { mode: 'index', intersect: false },
+				plugins: {
+					legend: { display: true, position: 'top', labels: { color: textColor, usePointStyle: true, boxWidth: 8 } },
+					tooltip: { callbacks: { label: (c) => c.parsed.y === null ? null : `${c.dataset.label}: ${EM.fmt(c.parsed.y, 1)} ${data.unit}` } },
+				},
+				scales: {
+					x: { grid: { display: false }, ticks: { color: textColor } },
+					y: { beginAtZero: true, grid: { color: gridColor }, ticks: { color: textColor }, title: { display: true, text: data.unit, color: textColor } },
+				},
+			},
+		});
+		document.getElementById('forecastNote').classList.add('d-none');
+		if (!data.series.length) EM.toast('Für den Jahresvergleich liegen noch nicht genug Daten vor.');
+	}
+
 	renderChart(data) {
 		const ctx = document.getElementById('mainChart').getContext('2d');
 		this.chart?.destroy();
@@ -182,9 +304,7 @@ class EnergyApp {
 		const nForecast = (data.forecast_values || []).length;
 		const labels = [...data.labels, ...(data.forecast_labels || [])];
 
-		const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-		const gridColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
-		const textColor = isDark ? '#98989D' : '#86868B';
+		const { isDark, gridColor, textColor } = this.chartTheme();
 		const mainColor = data.color || '#0071E3';
 		const pad = (n) => new Array(n).fill(null);
 
@@ -286,16 +406,88 @@ class EnergyApp {
 	// ------------------------------------------------------------------
 	// Modal: Zählerstand erfassen
 	// ------------------------------------------------------------------
-	openModal(type) {
+	/** Ohne $reading: neuen Zählerstand erfassen, sonst die übergebene Ablesung bearbeiten. */
+	openModal(type, reading = null) {
 		const now = new Date();
-		document.getElementById('inputType').value = type;
-		document.getElementById('modalReadingTitle').textContent = `Zählerstand: ${this.labels[type] || type}`;
-		document.getElementById('formAlert').classList.add('d-none');
-		document.getElementById('inputDate').value = EM.localDate(now);
-		document.getElementById('inputTime').value = EM.localTime(now);
-		document.getElementById('inputValue').value = '';
+		const $ = (id) => document.getElementById(id);
+		$('inputType').value = type;
+		$('inputId').value = reading ? reading.id : '';
+		$('modalReadingTitle').textContent = `${reading ? 'Bearbeiten' : 'Zählerstand'}: ${this.labels[type] || type}`;
+		$('formAlert').classList.add('d-none');
+		$('inputDate').value = reading ? reading.reading_date.slice(0, 10) : EM.localDate(now);
+		$('inputTime').value = reading ? reading.reading_date.slice(11, 16) : EM.localTime(now);
+		$('inputValue').value = reading ? EM.fmtFixed(reading.counter_value, 0, 3) : '';
 		this.readingModal.open();
-		document.getElementById('inputValue').focus();
+		$('inputValue').focus();
+	}
+
+	// ------------------------------------------------------------------
+	// Zählerstände verwalten (Liste, ändern, löschen)
+	// ------------------------------------------------------------------
+	openReadings(type) {
+		const sel = document.getElementById('readingsType');
+		sel.innerHTML = Object.entries(this.labels)
+			.map(([t, label]) => `<option value="${EM.escape(t)}">${EM.escape(label)}</option>`).join('');
+		sel.value = type;
+		this.readingsModal.open();
+		this.loadReadings(type, true);
+	}
+
+	async loadReadings(type, reset) {
+		const pg = this.readingsPaging;
+		if (reset) { pg.type = type; pg.offset = 0; document.getElementById('readingsBody').innerHTML = ''; }
+		let res;
+		try {
+			res = await EM.api('get_readings', { params: { type, limit: pg.pageSize, offset: pg.offset } });
+		} catch (e) {
+			EM.toast('Fehler beim Laden: ' + e.message);
+			return;
+		}
+		const unit = (this.units || {})[type] || '';
+		const body = document.getElementById('readingsBody');
+		this.readingRows = reset ? res.readings : [...(this.readingRows || []), ...res.readings];
+		const rows = res.readings.map((r) => `
+			<tr>
+				<td>${EM.fmtDate(r.reading_date)} <span style="color:var(--text-secondary)">${EM.escape(r.reading_date.slice(11, 16))}</span></td>
+				<td><strong>${EM.fmtFixed(r.counter_value, 0, 3)}</strong> ${EM.escape(unit)}</td>
+				<td><div class="row-actions">
+					<button data-action="edit" data-id="${r.id}">Bearbeiten</button>
+					<button data-action="delete" data-id="${r.id}" class="danger">Löschen</button>
+				</div></td>
+			</tr>`).join('');
+		if (reset && !res.readings.length) {
+			body.innerHTML = '<tr><td colspan="3" style="text-align:center; color:var(--text-secondary); padding:24px">Noch keine Zählerstände.</td></tr>';
+		} else {
+			body.insertAdjacentHTML('beforeend', rows);
+		}
+		pg.offset += res.readings.length;
+		document.getElementById('readingsMore').classList.toggle('d-none', pg.offset >= res.total);
+	}
+
+	editReading(id) {
+		const reading = (this.readingRows || []).find((r) => String(r.id) === String(id));
+		if (reading) this.openModal(reading.utility_type, reading);
+	}
+
+	async deleteReading(id) {
+		const reading = (this.readingRows || []).find((r) => String(r.id) === String(id));
+		const what = reading ? `${EM.fmtDate(reading.reading_date)}: ${EM.fmtFixed(reading.counter_value, 0, 3)}` : 'diesen Zählerstand';
+		if (!confirm(`Zählerstand ${what} wirklich löschen?`)) return;
+		try {
+			await EM.api('delete_reading', { body: { id } });
+			EM.toast('Gelöscht');
+			this.afterReadingChange();
+		} catch (e) {
+			EM.toast('Fehler: ' + e.message, 6000);
+		}
+	}
+
+	afterReadingChange() {
+		this.loadDashboard();
+		this.loadChart();
+		if (document.getElementById('readingsModal').classList.contains('active')) {
+			this.loadReadings(this.readingsPaging.type, true);
+		}
 	}
 
 	async saveReading(e, force = false) {
@@ -310,8 +502,7 @@ class EnergyApp {
 			await EM.api('save_reading', { body });
 			this.readingModal.close();
 			EM.toast('Gespeichert');
-			this.loadDashboard();
-			this.loadChart();
+			this.afterReadingChange();
 		} catch (err) {
 			if (err.needsConfirmation && confirm(err.message + '\n\nTrotzdem speichern (z.B. nach einem Zählerwechsel)?')) {
 				submit.disabled = false;

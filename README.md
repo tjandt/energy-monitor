@@ -7,11 +7,12 @@ PHP/MySQL-Dashboard für Strom-, Kaltwasser-, Warmwasser- und Wärmezähler im H
 
 ```
 index.php, tariffs.php      Seiten
+login.php, logout.php       optionaler Passwortschutz (config.php → auth)
 api.php                     JSON-API (einziger AJAX-Einstiegspunkt)
 weather_import.php          Wetterimport per CLI/Cron:  php weather_import.php [station] [ab-jahr]
 config.php                  Konfiguration (eigene Werte in config.local.php, gitignored)
 includes/                   Config, Database, EnergyService (Fassade), ReadingRepository,
-                            TariffRepository, Forecaster, Period, Num, WeatherImporter
+                            TariffRepository, Forecaster, DegreeDays, Auth, Period, Num, WeatherImporter
 assets/                     css, js (common/dashboard/tariffs/icons), vendor/chart.umd.js (lokal)
 sql/schema.sql              aus dem Code rekonstruiertes Schema (bitte gegen die echte DB prüfen)
 tests/run.php               Tests:  php tests/run.php   (SQLite in-memory, kein MySQL nötig)
@@ -31,3 +32,17 @@ tests/run.php               Tests:  php tests/run.php   (SQLite in-memory, kein 
 * Prognose laufende Periode: bisheriger Verbrauch + Restverbrauch aus dem Saisonprofil der Vorjahre,
   skaliert mit dem bisherigen Verlauf (siehe Kopfkommentar in `includes/Forecaster.php`).
 * Langzeitprognose: Monatsprofil der letzten N Jahre × Niveau der letzten 12 Monate.
+
+## Funktionen im Überblick
+
+* **Zählerstände verwalten:** Button „Zählerstände“ (Liste je Zähler, Bearbeiten/Löschen mit denselben Plausibilitätsprüfungen).
+* **Kostenprognose:** Im Verlauf-Chart bei „Kosten“ + „Prognose anzeigen“ (Tarif des Prognosemonats, sonst aktueller Tarif).
+* **Witterungsbereinigung:** Zähler mit `degree_day_adjust` (Standard: Wärme) zeigen auf der Kachel den Verbrauch je Gradtag
+  (VDI 3807, Gt20/15, Werte in `config.php → degree_days`) gegenüber demselben Zeitabschnitt im Vorjahr. Voraussetzung:
+  importierte Wetterdaten; im Sommer (zu wenig Gradtage) wird nichts angezeigt.
+* **Jahresvergleich:** Chart-Ansicht „Jahresvergleich“ – Monatswerte oder kumuliert, Verbrauch oder Kosten, letzte 3 Jahre.
+* **Login (optional):** in `config.local.php` aktivieren:
+  `<?php return ['auth' => ['enabled' => true, 'password_hash' => '…']];`
+  Hash: `php -r "echo password_hash('MeinPasswort', PASSWORD_DEFAULT), PHP_EOL;"`.
+  Nach 5 Fehlversuchen wird die IP 10 Minuten gesperrt. Bei aktiviertem Login ohne Hash wird jeder Zugriff abgewiesen.
+  Hinweis: Das Passwort geht im Klartext über die Leitung – bei Zugriff über das Heimnetz hinaus unbedingt HTTPS verwenden.

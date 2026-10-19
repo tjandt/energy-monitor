@@ -15,7 +15,7 @@ class ReadingRepository {
 
 	private PDO $pdo;
 
-	/** @var array<string, array{ts: int[], raw: float[], cum: float[], dates: string[]}> */
+	/** @var array<string, array{ts: int[], raw: float[], cum: float[], dates: string[], ids: int[]}> */
 	private array $cache = [];
 
 	public function __construct(PDO $pdo) {
@@ -25,12 +25,12 @@ class ReadingRepository {
 	private function load(string $type): array {
 		if (!isset($this->cache[$type])) {
 			$stmt = $this->pdo->prepare(
-				'SELECT reading_date, counter_value FROM meter_readings
+				'SELECT id, reading_date, counter_value FROM meter_readings
 				 WHERE utility_type = ? ORDER BY reading_date ASC'
 			);
 			$stmt->execute([$type]);
 
-			$series = ['ts' => [], 'raw' => [], 'cum' => [], 'dates' => []];
+			$series = ['ts' => [], 'raw' => [], 'cum' => [], 'dates' => [], 'ids' => []];
 			$cum = 0.0;
 			$prev = null;
 			foreach ($stmt->fetchAll() as $row) {
@@ -44,6 +44,7 @@ class ReadingRepository {
 				$series['raw'][] = $val;
 				$series['cum'][] = $cum;
 				$series['dates'][] = $row['reading_date'];
+				$series['ids'][] = (int) $row['id'];
 			}
 			$this->cache[$type] = $series;
 		}
@@ -118,17 +119,38 @@ class ReadingRepository {
 	/**
 	 * Rohwerte der Ablesungen unmittelbar vor und nach $ts (für die
 	 * Plausibilitätsprüfung). Eine Ablesung exakt zu $ts zählt als "same".
+	 * $excludeId blendet eine Ablesung aus (beim Bearbeiten derselben).
 	 * @return array{prev: ?float, next: ?float, same: bool}
 	 */
-	public function neighbours(string $type, int $ts): array {
+	public function neighbours(string $type, int $ts, ?int $excludeId = null): array {
 		$s = $this->load($type);
 		$out = ['prev' => null, 'next' => null, 'same' => false];
 		foreach ($s['ts'] as $i => $t) {
+			if ($excludeId !== null && $s['ids'][$i] === $excludeId) continue;
 			if ($t === $ts) $out['same'] = true;
 			elseif ($t < $ts) $out['prev'] = $s['raw'][$i];
 			elseif ($out['next'] === null) $out['next'] = $s['raw'][$i];
 		}
 		return $out;
+	}
+
+	/** Ablesungen eines Typs, neueste zuerst (für die Verwaltungsliste). */
+	public function list(string $type, int $limit, int $offset = 0): array {
+		$stmt = $this->pdo->prepare(
+			'SELECT id, utility_type, reading_date, counter_value FROM meter_readings
+			 WHERE utility_type = ? ORDER BY reading_date DESC, id DESC LIMIT ? OFFSET ?'
+		);
+		$stmt->bindValue(1, $type);
+		$stmt->bindValue(2, $limit, PDO::PARAM_INT);
+		$stmt->bindValue(3, $offset, PDO::PARAM_INT);
+		$stmt->execute();
+		return $stmt->fetchAll();
+	}
+
+	public function find(int $id): ?array {
+		$stmt = $this->pdo->prepare('SELECT id, utility_type, reading_date, counter_value FROM meter_readings WHERE id = ?');
+		$stmt->execute([$id]);
+		return $stmt->fetch() ?: null;
 	}
 
 	public function insert(string $type, string $datetime, float $value): void {
@@ -137,5 +159,20 @@ class ReadingRepository {
 		);
 		$stmt->execute([$type, $datetime, $value]);
 		unset($this->cache[$type]);
+	}
+
+	public function update(int $id, string $datetime, float $value): void {
+		$row = $this->find($id);
+		if (!$row) throw new InvalidArgumentException('Zählerstand nicht gefunden');
+		$this->pdo->prepare('UPDATE meter_readings SET reading_date = ?, counter_value = ? WHERE id = ?')
+			->execute([$datetime, $value, $id]);
+		unset($this->cache[$row['utility_type']]);
+	}
+
+	public function delete(int $id): void {
+		$row = $this->find($id);
+		if (!$row) throw new InvalidArgumentException('Zählerstand nicht gefunden');
+		$this->pdo->prepare('DELETE FROM meter_readings WHERE id = ?')->execute([$id]);
+		unset($this->cache[$row['utility_type']]);
 	}
 }

@@ -1,6 +1,8 @@
 <?php
 // tariffs.php – reine Ansichtsseite (braucht keine DB), alle Datenoperationen laufen über api.php
-require_once __DIR__ . '/includes/Config.php';
+require_once __DIR__ . '/includes/Auth.php';
+Config::all();
+Auth::requirePage();
 $utilities = Config::get('utilities');
 ?>
 <!DOCTYPE html>
@@ -28,6 +30,9 @@ $utilities = Config::get('utilities');
 		</div>
 		<div class="topbar-actions">
 			<a href="index.php" class="icon-btn" id="backBtn" title="Zurück zum Dashboard"></a>
+			<?php if (Auth::enabled()): ?>
+			<form method="post" action="logout.php" style="margin:0"><button type="submit" class="btn btn-outline" title="Abmelden"><span id="logoutIcon"></span><span class="label">Abmelden</span></button></form>
+			<?php endif; ?>
 			<button id="themeToggle" class="icon-btn" title="Darstellung umschalten"><span id="themeIcon"></span></button>
 			<button id="addTariffBtn" class="btn btn-primary"><span id="plusIcon"></span><span class="label">Neuer Tarif</span></button>
 		</div>
@@ -120,6 +125,7 @@ $utilities = Config::get('utilities');
 	document.getElementById('plusIcon').innerHTML = icon('plus');
 	document.getElementById('tariffModalClose').innerHTML = icon('close');
 	document.getElementById('backBtn').innerHTML = icon('back');
+	const lo = document.getElementById('logoutIcon'); if (lo) lo.innerHTML = icon('logout');
 </script>
 </body>
 </html>

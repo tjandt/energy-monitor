@@ -19,6 +19,10 @@ const EM = {
 		}
 		const res = await fetch(url, opts);
 		const json = await res.json().catch(() => ({}));
+		if (res.status === 401 && json.login_required) {
+			window.location.href = 'login.php';
+			throw new Error('Nicht angemeldet');
+		}
 		if (!res.ok || json.success === false) {
 			const err = new Error(json.error || `Serverfehler (HTTP ${res.status})`);
 			err.status = res.status;
@@ -70,14 +74,14 @@ const EM = {
 			opener?.focus?.();
 		};
 		el.addEventListener('mousedown', (e) => { if (e.target === el) close(); });
-		document.addEventListener('keydown', (e) => {
-			if (e.key === 'Escape' && el.classList.contains('active')) close();
-		});
+		EM._modals.set(el, close);
 		return {
 			open() { opener = document.activeElement; el.classList.add('active'); },
 			close,
 		};
 	},
+
+	_modals: new Map(),
 
 	escape(s) {
 		return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -106,3 +110,11 @@ const EM = {
 		return `${p(d.getHours())}:${p(d.getMinutes())}`;
 	},
 };
+
+// Esc schließt nur das oberste (zuletzt im DOM stehende) offene Modal
+document.addEventListener('keydown', (e) => {
+	if (e.key !== 'Escape') return;
+	const open = [...document.querySelectorAll('.modal-overlay.active')];
+	const top = open[open.length - 1];
+	if (top && EM._modals.has(top)) EM._modals.get(top)();
+});

@@ -14,6 +14,7 @@ require_once __DIR__ . '/Period.php';
 require_once __DIR__ . '/ReadingRepository.php';
 require_once __DIR__ . '/TariffRepository.php';
 require_once __DIR__ . '/Forecaster.php';
+require_once __DIR__ . '/DegreeDays.php';
 
 /** Eingabe ist formal gültig, aber unplausibel – mit force=1 trotzdem speicherbar. */
 class ImplausibleReadingException extends InvalidArgumentException {}
@@ -26,6 +27,7 @@ class EnergyService {
 	private ReadingRepository $readings;
 	private TariffRepository $tariffs;
 	private Forecaster $forecaster;
+	private DegreeDays $degreeDays;
 
 	public function __construct(?PDO $pdo = null, ?array $config = null) {
 		if ($config !== null) Config::override($config);
@@ -36,6 +38,7 @@ class EnergyService {
 		$this->readings = new ReadingRepository($this->pdo);
 		$this->tariffs = new TariffRepository($this->pdo, $this->utilities);
 		$this->forecaster = new Forecaster($this->readings, $this->cfg);
+		$this->degreeDays = new DegreeDays($this->pdo, $full['degree_days']);
 	}
 
 	// =====================================================================
@@ -125,6 +128,7 @@ class EnergyService {
 			'seasonal_reference' => $forecast['seasonal_reference'],
 			'compare'            => $compare,
 			'trend'              => $this->calcTrend($forecast['estimate'], $compare[0]['value']),
+			'weather_adjusted'   => $this->weatherAdjusted($type, $granularity, $now, $forecast),
 			'cost_estimate'      => $this->periodCost($type, $forecast['estimate'], $now, $granularity),
 		];
 	}
@@ -138,6 +142,44 @@ class EnergyService {
 		$this->assertValidType($type);
 		$months = $monthsAhead ?? (int) $this->cfg['forecast_months_ahead'];
 		return $this->forecaster->longTerm($type, max(1, min(24, $months)));
+	}
+
+	/**
+	 * Witterungsbereinigter Vergleich: spezifischer Verbrauch (Einheit je
+	 * Gradtag) im bisherigen Verlauf der laufenden Periode gegenüber demselben
+	 * Zeitabschnitt des Vorjahres. null bei Zählern ohne Bereinigung, fehlenden
+	 * Wetterdaten oder zu wenig Heizbedarf (z.B. Sommer).
+	 */
+	private function weatherAdjusted(string $type, string $granularity, DateTimeInterface $now, array $forecast): ?array {
+		if (empty($this->utilities[$type]['degree_day_adjust']) || $forecast['data_until'] === null) return null;
+
+		[$start] = Period::bounds($granularity, $now);
+		$until = new DateTime($forecast['data_until']);
+		[$prevStart, $prevEnd] = Period::bounds($granularity, (clone $now)->modify('-1 year'));
+		$cut = (new DateTime())->setTimestamp((int) round(
+			$prevStart->getTimestamp() + $forecast['elapsed_fraction'] * ($prevEnd->getTimestamp() - $prevStart->getTimestamp())
+		));
+
+		$gt = $this->degreeDays->between($start, $until);
+		$gtPrev = $this->degreeDays->between($prevStart, $cut);
+		$min = $this->degreeDays->minDegreeDays();
+		if ($gt === null || $gtPrev === null || $gt < $min || $gtPrev < $min) return null;
+
+		$cons = $forecast['elapsed_consumption'];
+		$consPrev = $this->readings->consumption($type, $prevStart->getTimestamp(), $cut->getTimestamp());
+		if ($cons <= 0 || $consPrev <= 0) return null;
+
+		$spec = $cons / $gt;
+		$specPrev = $consPrev / $gtPrev;
+		return [
+			'specific'      => round($spec, 3),
+			'specific_prev' => round($specPrev, 3),
+			'change_pct'    => round(($spec / $specPrev - 1) * 100, 1),
+			'trend'         => $this->calcTrend($spec, $specPrev),
+			'gt'            => (int) round($gt),
+			'gt_prev'       => (int) round($gtPrev),
+			'unit'          => $this->utilities[$type]['unit'] . '/Gt',
+		];
 	}
 
 	private function calcTrend(float $current, float $reference): string {
@@ -250,13 +292,21 @@ class EnergyService {
 
 		$forecastLabels = [];
 		$forecastValues = [];
-		if ($withForecast && $mode === 'usage') {
+		if ($withForecast) {
 			// Monatswerte auf die Balkenbreite des Charts (Woche/Tag) umrechnen,
 			// sonst wären Prognose- und Ist-Balken nicht vergleichbar.
+			$barDays = $weekly ? 7 : 1;
 			foreach ($this->getLongTermForecast($type)['forecast'] as $ym => $val) {
 				$daysInMonth = (int) date('t', strtotime($ym . '-01'));
+				$scaled = $val * $barDays / $daysInMonth;
 				$forecastLabels[] = Period::monthName((int) substr($ym, 5, 2)) . ' ' . substr($ym, 0, 4);
-				$forecastValues[] = round($val * ($weekly ? 7 : 1) / $daysInMonth, 2);
+				if ($mode === 'cost') {
+					// Tarif des Prognosemonats, sonst der heute gültige
+					$forecastValues[] = $this->tariffs->cost($type, $scaled, $ym . '-15', $barDays / 30.44)
+						?? $this->tariffs->cost($type, $scaled, $today->format('Y-m-d'), $barDays / 30.44);
+				} else {
+					$forecastValues[] = round($scaled, 2);
+				}
 			}
 		}
 
@@ -299,6 +349,64 @@ class EnergyService {
 	}
 
 	// =====================================================================
+	// JAHRESVERGLEICH
+	// =====================================================================
+
+	/**
+	 * Monatswerte (oder kumuliert seit Jahresbeginn) der letzten Jahre als
+	 * Linien übereinander. Unvollständig erfasste Monate bleiben leer;
+	 * kumuliert werden nur Jahre gezeigt, die ab dem 1. Januar abgedeckt sind.
+	 */
+	public function getYearComparison(string $type, ?string $mode = 'usage', bool $cumulative = false, int $years = 3): array {
+		$this->assertValidType($type);
+		$mode = $mode === 'cost' ? 'cost' : 'usage';
+		$years = max(2, min(6, $years));
+		$meta = $this->utilities[$type];
+		$first = $this->readings->firstTimestamp($type);
+		$last = $this->readings->lastTimestamp($type);
+		$thisYear = (int) date('Y');
+
+		$series = [];
+		for ($y = $thisYear - $years + 1; $y <= $thisYear; $y++) {
+			if ($first === null) break;
+			if ($cumulative && (new DateTime("$y-01-01"))->getTimestamp() < $first) continue;
+
+			$values = [];
+			$running = 0.0;
+			$broken = false;
+			for ($m = 1; $m <= 12; $m++) {
+				$mStart = new DateTime(sprintf('%d-%02d-01', $y, $m));
+				$mEnd = (clone $mStart)->modify('+1 month');
+				$sTs = $mStart->getTimestamp();
+				$eTs = $mEnd->getTimestamp();
+				$complete = $sTs >= $first && $eTs <= $last;
+				$covered = $eTs > $first && $sTs < $last;
+				if ($broken || !$covered || (!$cumulative && !$complete)) { $values[] = null; continue; }
+
+				$part = $this->readings->consumption($type, $sTs, $eTs, true);
+				if ($mode === 'cost') {
+					$fraction = (min($eTs, $last) - max($sTs, $first)) / ($eTs - $sTs);
+					$part = $this->tariffs->cost($type, $part, $mStart->format('Y-m-d'), $fraction);
+					if ($part === null) { $broken = $cumulative; $values[] = null; continue; }
+				}
+				$running += $part;
+				$values[] = round($cumulative ? $running : $part, 2);
+			}
+			if (array_filter($values, fn($v) => $v !== null)) {
+				$series[] = ['year' => $y, 'values' => $values, 'current' => $y === $thisYear];
+			}
+		}
+
+		return [
+			'labels'     => array_map(fn($m) => Period::monthName($m), range(1, 12)),
+			'series'     => $series,
+			'unit'       => $mode === 'cost' ? '€' : $meta['unit'],
+			'color'      => $meta['color'],
+			'cumulative' => $cumulative,
+		];
+	}
+
+	// =====================================================================
 	// TARIFE
 	// =====================================================================
 
@@ -315,16 +423,34 @@ class EnergyService {
 	}
 
 	// =====================================================================
-	// NEUEN ZÄHLERSTAND SPEICHERN
+	// ZÄHLERSTÄNDE: LISTE / SPEICHERN / ÄNDERN / LÖSCHEN
 	// =====================================================================
 
+	public function getReadings(string $type, int $limit = 50, int $offset = 0): array {
+		$this->assertValidType($type);
+		return [
+			'readings' => $this->readings->list($type, max(1, min(200, $limit)), max(0, $offset)),
+			'total'    => $this->readings->count($type),
+		];
+	}
+
+	public function deleteReading(int $id): void {
+		$this->readings->delete($id);
+	}
+
 	/**
-	 * Speichert eine Ablesung. Ohne $force wird auf Plausibilität geprüft
+	 * Speichert eine Ablesung (mit $id: ändert eine vorhandene; der Zählertyp
+	 * bleibt dann unverändert). Ohne $force wird auf Plausibilität geprüft
 	 * (kein Zählerstand kleiner als der vorherige bzw. größer als der
 	 * nachfolgende, z.B. durch Zahlendreher oder falsches Komma); bei
 	 * Zählerwechsel kann mit $force trotzdem gespeichert werden.
 	 */
-	public function saveReading(string $type, string $date, string $time, string $rawValue, bool $force = false): void {
+	public function saveReading(string $type, string $date, string $time, string $rawValue, bool $force = false, ?int $id = null): void {
+		if ($id !== null) {
+			$existing = $this->readings->find($id);
+			if (!$existing) throw new InvalidArgumentException('Zählerstand nicht gefunden');
+			$type = $existing['utility_type'];
+		}
 		$this->assertValidType($type);
 
 		$when = DateTime::createFromFormat('!Y-m-d H:i', "$date $time");
@@ -340,7 +466,7 @@ class EnergyService {
 			throw new InvalidArgumentException('Der Zählerstand muss eine gültige, nicht negative Zahl sein');
 		}
 
-		$n = $this->readings->neighbours($type, $when->getTimestamp());
+		$n = $this->readings->neighbours($type, $when->getTimestamp(), $id);
 		if ($n['same']) {
 			throw new InvalidArgumentException('Für diesen Zeitpunkt existiert bereits ein Zählerstand');
 		}
@@ -354,6 +480,10 @@ class EnergyService {
 			}
 		}
 
-		$this->readings->insert($type, $when->format('Y-m-d H:i:s'), $value);
+		if ($id !== null) {
+			$this->readings->update($id, $when->format('Y-m-d H:i:s'), $value);
+		} else {
+			$this->readings->insert($type, $when->format('Y-m-d H:i:s'), $value);
+		}
 	}
 }

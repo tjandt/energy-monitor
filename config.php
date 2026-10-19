@@ -45,6 +45,30 @@ return [
 		'growth_rate_clamp' => 0.30,
 	],
 
+	// Gradtage nach VDI 3807 (Gt20/15): je Tag mit Ø-Temperatur unter der
+	// Heizgrenze zählt (Raumtemperatur − Ø-Temperatur). Wird für die
+	// witterungsbereinigte Auswertung von Zählern mit 'degree_day_adjust' genutzt.
+	'degree_days' => [
+		'indoor_temp'  => 20,
+		'heating_limit' => 15,
+		// darunter ist der Zeitraum zu warm für eine aussagekräftige Bereinigung
+		'min_degree_days' => 15,
+		// mindestens dieser Anteil der Tage muss Wetterdaten haben
+		'min_coverage' => 0.8,
+	],
+
+	// Optionaler Passwortschutz (Standard: aus, App läuft im Heimnetz).
+	// Hash erzeugen:  php -r "echo password_hash('MeinPasswort', PASSWORD_DEFAULT), PHP_EOL;"
+	// und in config.local.php ablegen: ['auth' => ['enabled' => true, 'password_hash' => '$2y$…']]
+	'auth' => [
+		'enabled'       => false,
+		'password_hash' => '',
+		'session_hours' => 24 * 30,
+		// nach so vielen Fehlversuchen von einer IP wird für lockout_minutes gesperrt
+		'max_attempts'    => 5,
+		'lockout_minutes' => 10,
+	],
+
 	// Nur noch diese vier Zähler werden unterstützt (Gas wurde entfernt)
 	'utilities' => [
 		'Strom' => [
@@ -72,6 +96,7 @@ return [
 			'label'      => 'Wärme',
 			'unit'       => 'kWh',
 			'is_heating' => true,
+			'degree_day_adjust' => true, // witterungsbereinigter Vorjahresvergleich
 			'color'      => '#AF52DE',
 			'icon'       => 'flame',
 		],

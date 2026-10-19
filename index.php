@@ -1,3 +1,8 @@
+<?php
+require_once __DIR__ . '/includes/Auth.php';
+Config::all();
+Auth::requirePage();
+?>
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -24,8 +29,12 @@
 		</div>
 		<div class="topbar-actions">
 			<a href="tariffs.php" class="btn btn-outline"><span class="label">Tarife</span></a>
+			<button id="readingsBtn" class="btn btn-outline" title="Zählerstände ansehen, ändern, löschen"><span id="listIcon"></span><span class="label">Zählerstände</span></button>
 			<button id="weatherBtn" class="btn btn-outline" title="Wetterdaten aktualisieren"><span class="label">Wetter&nbsp;Update</span></button>
 			<button id="addBtn" class="btn btn-primary"><span id="plusIcon"></span><span class="label">Zählerstand</span></button>
+			<?php if (Auth::enabled()): ?>
+			<form method="post" action="logout.php" style="margin:0"><button type="submit" class="btn btn-outline" title="Abmelden"><span id="logoutIcon"></span><span class="label">Abmelden</span></button></form>
+			<?php endif; ?>
 			<button id="themeToggle" class="icon-btn" title="Darstellung umschalten"><span id="themeIcon"></span></button>
 		</div>
 	</div>
@@ -50,6 +59,11 @@
 		<h2 class="section-title">Verlauf &amp; Prognose</h2>
 
 		<div class="chart-toolbar">
+			<div class="segmented" id="chartView">
+				<button data-value="timeline" class="active">Verlauf</button>
+				<button data-value="years">Jahresvergleich</button>
+			</div>
+
 			<div class="segmented" id="chartPeriod">
 				<button data-value="last_week">Woche</button>
 				<button data-value="last_month">Monat</button>
@@ -66,9 +80,14 @@
 
 			<div class="spacer"></div>
 
-			<label class="forecast-toggle">
+			<label class="forecast-toggle" id="forecastToggle">
 				<input type="checkbox" id="forecastCheckbox">
 				Prognose anzeigen
+			</label>
+
+			<label class="forecast-toggle d-none" id="cumulativeToggle">
+				<input type="checkbox" id="cumulativeCheckbox">
+				Kumuliert
 			</label>
 
 			<div class="segmented" id="chartMode">
@@ -89,7 +108,29 @@
 	</div>
 </div>
 
-<!-- Modal: Zählerstand erfassen -->
+<!-- Modal: Zählerstände verwalten -->
+<div class="modal-overlay" id="readingsModal">
+	<div class="modal-box wide">
+		<div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:16px">
+			<h2 class="modal-title" style="margin:0">Zählerstände</h2>
+			<select id="readingsType" class="input" style="width:auto; flex:1; max-width:200px" aria-label="Zähler"></select>
+			<button type="button" id="readingsClose" class="icon-btn" aria-label="Schließen"></button>
+		</div>
+		<div class="table-card" style="box-shadow:none; border:1px solid var(--separator)">
+			<div class="modal-scroll">
+				<table>
+					<thead><tr><th>Datum</th><th>Zählerstand</th><th></th></tr></thead>
+					<tbody id="readingsBody"><tr><td colspan="3" style="text-align:center; color:var(--text-secondary)">Lade…</td></tr></tbody>
+				</table>
+			</div>
+		</div>
+		<div class="modal-actions">
+			<button type="button" id="readingsMore" class="btn btn-outline btn-block d-none">Mehr laden</button>
+		</div>
+	</div>
+</div>
+
+<!-- Modal: Zählerstand erfassen / bearbeiten (liegt über der Liste) -->
 <div class="modal-overlay" id="readingModal">
 	<div class="modal-box">
 		<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px">
@@ -100,6 +141,7 @@
 
 		<form id="readingForm">
 			<input type="hidden" name="type" id="inputType">
+			<input type="hidden" name="id" id="inputId">
 
 			<div class="field-row">
 				<div class="field">
@@ -133,6 +175,9 @@
 <script>
 	document.getElementById('plusIcon').innerHTML = icon('plus');
 	document.getElementById('modalClose').innerHTML = icon('close');
+	document.getElementById('readingsClose').innerHTML = icon('close');
+	document.getElementById('listIcon').innerHTML = icon('list');
+	const lo = document.getElementById('logoutIcon'); if (lo) lo.innerHTML = icon('logout');
 </script>
 </body>
 </html>

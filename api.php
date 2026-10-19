@@ -17,6 +17,7 @@ header('Cache-Control: no-store');
 
 require_once __DIR__ . '/includes/EnergyService.php';
 require_once __DIR__ . '/includes/WeatherImporter.php';
+require_once __DIR__ . '/includes/Auth.php';
 
 function respond(array $data, int $code = 200): never {
 	http_response_code($code);
@@ -40,6 +41,7 @@ function requireWrite(): void {
 
 try {
 	Config::all(); // setzt auch die Zeitzone
+	Auth::requireApi();
 	$service = new EnergyService();
 	$action = param($_GET, 'action', '');
 
@@ -62,15 +64,38 @@ try {
 			$months = param($_GET, 'months');
 			respond($service->getLongTermForecast(param($_GET, 'type', ''), $months !== null ? (int) $months : null));
 
+		case 'get_year_comparison':
+			respond($service->getYearComparison(
+				param($_GET, 'type', ''),
+				param($_GET, 'mode', 'usage'),
+				param($_GET, 'cumulative') === '1'
+			));
+
+		case 'get_readings':
+			respond($service->getReadings(
+				param($_GET, 'type', ''),
+				(int) param($_GET, 'limit', '50'),
+				(int) param($_GET, 'offset', '0')
+			));
+
+		case 'delete_reading':
+			requireWrite();
+			$id = (int) param($_POST, 'id', '0');
+			if ($id <= 0) fail('Ungültige ID');
+			$service->deleteReading($id);
+			respond(['success' => true]);
+
 		case 'save_reading':
 			requireWrite();
 			try {
+				$id = (int) param($_POST, 'id', '0');
 				$service->saveReading(
 					param($_POST, 'type', ''),
 					param($_POST, 'date', ''),
 					param($_POST, 'time', ''),
 					param($_POST, 'value', ''),
-					param($_POST, 'force') === '1'
+					param($_POST, 'force') === '1',
+					$id > 0 ? $id : null
 				);
 			} catch (ImplausibleReadingException $e) {
 				fail($e->getMessage(), 409, ['needs_confirmation' => true]);
