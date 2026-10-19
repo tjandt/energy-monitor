@@ -6,9 +6,14 @@
  * die Werte im Abschnitt "db" und ggf. "weather" an die eigene Umgebung
  * anpassen.
  *
+ * Eigene Werte (v.a. Zugangsdaten) am besten in config.local.php ablegen:
+ * Die Datei ist in .gitignore eingetragen und überschreibt rekursiv die
+ * Werte hier, z.B.  <?php return ['db' => ['user' => '…', 'pass' => '…']];
+ *
  * SICHERHEITSHINWEIS: Diese Datei enthält Zugangsdaten im Klartext.
- * Stelle sicher, dass sie NICHT über den Webserver direkt aufrufbar ist
- * (z.B. per .htaccess "Deny from all" oder außerhalb des Document-Root).
+ * Die mitgelieferte .htaccess sperrt sie für den direkten Aufruf (Apache 2.4);
+ * bei nginx o.ä. bitte entsprechend selbst sperren. Die hier hinterlegten
+ * Standard-Zugangsdaten sind Beispielwerte aus der Entwicklung – Passwort ändern!
  * Da die App laut Anforderung nur im internen Heimnetz läuft, wurde bewusst
  * auf ein Login verzichtet – ein Basisschutz auf Webserver-Ebene
  * (z.B. per Reverse-Proxy/Firewall-Regel) wird trotzdem empfohlen.

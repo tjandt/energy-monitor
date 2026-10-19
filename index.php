@@ -2,10 +2,17 @@
 <html lang="de">
 <head>
 	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>Energy Monitor</title>
 	<link rel="stylesheet" href="assets/css/style.css">
-	<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+	<script>
+		// Theme vor dem ersten Rendern setzen (verhindert Aufblitzen im falschen Design)
+		try {
+			document.documentElement.setAttribute('data-theme', localStorage.getItem('em-theme') ||
+				(matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+		} catch (e) { /* Storage gesperrt */ }
+	</script>
+	<script src="assets/vendor/chart.umd.js"></script>
 </head>
 <body>
 
@@ -61,7 +68,7 @@
 
 			<label class="forecast-toggle">
 				<input type="checkbox" id="forecastCheckbox">
-				Prognose (6 Monate)
+				Prognose anzeigen
 			</label>
 
 			<div class="segmented" id="chartMode">
@@ -75,8 +82,9 @@
 		</div>
 
 		<div class="forecast-note d-none" id="forecastNote">
-			Die gestrichelten Balken zeigen eine <strong>Schätzung</strong> auf Basis des saisonalen Verbrauchsmusters
-			der letzten Jahre und des jüngsten Verbrauchstrends – keine Garantie für den tatsächlichen Verbrauch.
+			Die gestrichelten Balken zeigen eine <strong>Schätzung</strong> je künftigem Monat (als Ø pro Woche bzw. Tag,
+			damit sie mit den Ist-Balken vergleichbar sind) auf Basis des saisonalen Verbrauchsmusters der letzten Jahre
+			und des Niveaus der letzten 12 Monate – keine Garantie für den tatsächlichen Verbrauch.
 		</div>
 	</div>
 </div>
@@ -106,7 +114,7 @@
 
 			<div class="field">
 				<label>Zählerstand</label>
-				<input type="text" name="value" id="inputValue" class="input" placeholder="0,00" inputmode="decimal" required>
+				<input type="text" name="value" id="inputValue" class="input" placeholder="z.B. 12.345,6" inputmode="decimal" autocomplete="off" required>
 			</div>
 
 			<div class="modal-actions">
@@ -120,6 +128,7 @@
 <div class="toast" id="toast"></div>
 
 <script src="assets/js/icons.js"></script>
+<script src="assets/js/common.js"></script>
 <script src="assets/js/dashboard.js"></script>
 <script>
 	document.getElementById('plusIcon').innerHTML = icon('plus');

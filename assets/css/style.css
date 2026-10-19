@@ -525,3 +525,15 @@ tr.current-row td { color: var(--text); }
 	.grid { grid-template-columns: 1fr; }
 	.compare-row { flex-wrap: wrap; }
 }
+
+/* --------------------------------------------------------------------
+   Barrierefreiheit / Zustände
+   -------------------------------------------------------------------- */
+
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.card[role="button"] { cursor: pointer; }
+.btn:disabled, .btn-text:disabled { opacity: 0.5; cursor: not-allowed; }
+
+@media (prefers-reduced-motion: reduce) {
+	* { transition: none !important; animation: none !important; }
+}

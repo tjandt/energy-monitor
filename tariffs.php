@@ -1,10 +1,7 @@
 <?php
-// tariffs.php – reine Ansichtsseite, alle Datenoperationen laufen über api.php
-require_once __DIR__ . '/includes/EnergyService.php';
-$config = require __DIR__ . '/config.php';
-date_default_timezone_set($config['app']['timezone']);
-$service = new EnergyService();
-$utilities = $config['utilities'];
+// tariffs.php – reine Ansichtsseite (braucht keine DB), alle Datenoperationen laufen über api.php
+require_once __DIR__ . '/includes/Config.php';
+$utilities = Config::get('utilities');
 ?>
 <!DOCTYPE html>
 <html lang="de">
@@ -13,6 +10,13 @@ $utilities = $config['utilities'];
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>Tarifverwaltung – Energy Monitor</title>
 	<link rel="stylesheet" href="assets/css/style.css">
+	<script>
+		// Theme vor dem ersten Rendern setzen (verhindert Aufblitzen im falschen Design)
+		try {
+			document.documentElement.setAttribute('data-theme', localStorage.getItem('em-theme') ||
+				(matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+		} catch (e) { /* Storage gesperrt */ }
+	</script>
 </head>
 <body>
 
@@ -110,14 +114,12 @@ $utilities = $config['utilities'];
 <div class="toast" id="toast"></div>
 
 <script src="assets/js/icons.js"></script>
+<script src="assets/js/common.js"></script>
 <script src="assets/js/tariffs.js"></script>
 <script>
 	document.getElementById('plusIcon').innerHTML = icon('plus');
 	document.getElementById('tariffModalClose').innerHTML = icon('close');
 	document.getElementById('backBtn').innerHTML = icon('back');
-	const savedTheme = localStorage.getItem('em-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-	document.documentElement.setAttribute('data-theme', savedTheme);
-	document.getElementById('themeIcon').innerHTML = icon(savedTheme === 'dark' ? 'sun' : 'moon');
 </script>
 </body>
 </html>
