@@ -8,11 +8,13 @@ PHP/MySQL-Dashboard für Strom-, Kaltwasser-, Warmwasser- und Wärmezähler im H
 ```
 index.php, tariffs.php      Seiten
 login.php, logout.php       optionaler Passwortschutz (config.php → auth)
+report.php                  Jahresbericht als PDF (report.php?year=2025)
 api.php                     JSON-API (einziger AJAX-Einstiegspunkt)
 weather_import.php          Wetterimport per CLI/Cron:  php weather_import.php [station] [ab-jahr]
 config.php                  Konfiguration (eigene Werte in config.local.php, gitignored)
 includes/                   Config, Database, EnergyService (Fassade), ReadingRepository,
-                            TariffRepository, Forecaster, DegreeDays, Auth, Period, Num, WeatherImporter
+                            TariffRepository, Forecaster, DegreeDays, Auth, Period, Num, WeatherImporter,
+                            YearReportPdf (+ vendor/fpdf, FPDF 1.9, freie Lizenz)
 assets/                     css, js (common/dashboard/tariffs/icons), vendor/chart.umd.js (lokal)
 sql/schema.sql              aus dem Code rekonstruiertes Schema (bitte gegen die echte DB prüfen)
 tests/run.php               Tests:  php tests/run.php   (SQLite in-memory, kein MySQL nötig)
@@ -20,8 +22,10 @@ tests/run.php               Tests:  php tests/run.php   (SQLite in-memory, kein 
 
 ## Betrieb
 
-* PHP ≥ 8.1 mit `pdo_mysql` und `zip`; Apache 2.4 (die `.htaccess`-Dateien sperren config, includes, tests, sql).
+* PHP ≥ 8.1 mit `pdo_mysql`, `zip` und `mbstring`; Apache 2.4 (die `.htaccess`-Dateien sperren config, includes, tests, sql).
   Bei nginx o.ä. diese Pfade selbst sperren.
+* **Update von älteren Versionen:** einmalig `sql/migrations/001_tariff_advance.sql` einspielen (Spalte `advance_monthly`
+  für den Stromabschlag). Ohne Migration läuft die App weiter, nur der Abschlag lässt sich nicht speichern.
 * DB-Zugang in `config.local.php` ablegen: `<?php return ['db' => ['user' => '…', 'pass' => '…']];`
 * Schreibende API-Aufrufe verlangen POST + Header `X-Requested-With: XMLHttpRequest`.
 
@@ -46,3 +50,8 @@ tests/run.php               Tests:  php tests/run.php   (SQLite in-memory, kein 
   Hash: `php -r "echo password_hash('MeinPasswort', PASSWORD_DEFAULT), PHP_EOL;"`.
   Nach 5 Fehlversuchen wird die IP 10 Minuten gesperrt. Bei aktiviertem Login ohne Hash wird jeder Zugriff abgewiesen.
   Hinweis: Das Passwort geht im Klartext über die Leitung – bei Zugriff über das Heimnetz hinaus unbedingt HTTPS verwenden.
+* **Stromabschlag:** Im Tarif (nur Strom) lässt sich ein monatlicher Abschlag in Euro hinterlegen. Die Stromkachel zeigt die
+  erwartete Nach-/Rückzahlung für das Abrechnungsjahr (Beginn: `billing_start_month` in `config.php`) und eine Abschlagsempfehlung.
+  Berechnung: Ist-Verbrauch + Prognose, je Monat zum gültigen Tarif, gegen die Summe der Abschläge.
+* **Jahresbericht (PDF):** Button „Bericht“ → Jahr wählen. Übersicht aller Zähler, je Zähler Monatsdiagramm und -tabelle mit
+  Vorjahresvergleich, Kosten, Abschlagssaldo (Strom) und Witterungsbereinigung (Wärme). Nur vollständig erfasste Monate zählen.

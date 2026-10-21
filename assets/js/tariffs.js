@@ -16,6 +16,7 @@ class TariffApp {
 		$('tariffModalClose').addEventListener('click', () => this.modal.close());
 		$('tariffModalCancel').addEventListener('click', () => this.modal.close());
 		$('tariffForm').addEventListener('submit', (e) => this.save(e));
+		$('tariffType').addEventListener('change', () => this.toggleAdvanceField());
 		$('tariffTableBody').addEventListener('click', (e) => {
 			const btn = e.target.closest('button[data-action]');
 			if (!btn) return;
@@ -54,6 +55,7 @@ class TariffApp {
 					<td>${t.valid_to ? EM.fmtDate(t.valid_to) : '–'}</td>
 					<td><strong>${priceEuro} €</strong></td>
 					<td><strong>${EM.fmtFixed(t.base_price_monthly / 100, 2, 2)} €</strong></td>
+					<td>${u.advance ? `<strong>${t.advance_monthly > 0 ? EM.fmtFixed(t.advance_monthly, 2, 2) + ' €' : '–'}</strong>` : '<span style="color:var(--text-secondary)">n. a.</span>'}</td>
 					<td>${isCurrent ? '✓ Aktuell' : 'Historisch'}</td>
 					<td>
 						<div class="row-actions">
@@ -74,8 +76,16 @@ class TariffApp {
 		$('tariffValidTo').value = tariff?.valid_to || '';
 		$('tariffPricePerUnit').value = tariff?.price_per_unit ?? '';
 		$('tariffBasePrice').value = tariff?.base_price_monthly ?? '';
+		$('tariffAdvance').value = tariff?.advance_monthly > 0 ? tariff.advance_monthly : '';
+		this.toggleAdvanceField();
 		$('tariffAlert').classList.add('d-none');
 		this.modal.open();
+	}
+
+	/** Das Abschlagsfeld gibt es nur für Zähler mit advance-Flag (Strom). */
+	toggleAdvanceField() {
+		const type = document.getElementById('tariffType').value;
+		document.getElementById('advanceField').classList.toggle('d-none', !this.utilities[type]?.advance);
 	}
 
 	async save(e) {

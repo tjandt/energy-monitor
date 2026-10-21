@@ -71,6 +71,9 @@ try {
 				param($_GET, 'cumulative') === '1'
 			));
 
+		case 'get_report_years':
+			respond(['years' => $service->getReportYears()]);
+
 		case 'get_readings':
 			respond($service->getReadings(
 				param($_GET, 'type', ''),

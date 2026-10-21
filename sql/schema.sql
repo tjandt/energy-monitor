@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS tariffs (
 	valid_to           DATE         NULL,
 	price_per_unit     DECIMAL(10,4) NOT NULL,       -- Cent pro Einheit
 	base_price_monthly DECIMAL(10,2) NOT NULL DEFAULT 0, -- Cent pro Monat
+	advance_monthly    DECIMAL(10,2) NOT NULL DEFAULT 0, -- Abschlag pro Monat in EURO (nur Strom), s. migrations/001
 	KEY idx_type_from (utility_type, valid_from)
 ) CHARACTER SET utf8mb4;
 

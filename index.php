@@ -29,6 +29,7 @@ Auth::requirePage();
 		</div>
 		<div class="topbar-actions">
 			<a href="tariffs.php" class="btn btn-outline"><span class="label">Tarife</span></a>
+			<button id="reportBtn" class="btn btn-outline" title="Jahresbericht als PDF"><span id="reportIcon"></span><span class="label">Bericht</span></button>
 			<button id="readingsBtn" class="btn btn-outline" title="Zählerstände ansehen, ändern, löschen"><span id="listIcon"></span><span class="label">Zählerstände</span></button>
 			<button id="weatherBtn" class="btn btn-outline" title="Wetterdaten aktualisieren"><span class="label">Wetter&nbsp;Update</span></button>
 			<button id="addBtn" class="btn btn-primary"><span id="plusIcon"></span><span class="label">Zählerstand</span></button>
@@ -108,6 +109,26 @@ Auth::requirePage();
 	</div>
 </div>
 
+<!-- Modal: Jahresbericht -->
+<div class="modal-overlay" id="reportModal">
+	<div class="modal-box">
+		<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px">
+			<h2 class="modal-title" style="margin:0">Jahresbericht (PDF)</h2>
+			<button type="button" id="reportClose" class="icon-btn" aria-label="Schließen"></button>
+		</div>
+		<p style="color:var(--text-secondary); font-size:14px; margin:0 0 16px">
+			Verbrauch, Kosten und Vorjahresvergleich je Zähler als PDF. Nicht vollständig erfasste Monate werden gekennzeichnet.
+		</p>
+		<div class="field">
+			<label for="reportYear">Jahr</label>
+			<select id="reportYear" class="input"></select>
+		</div>
+		<div class="modal-actions">
+			<a id="reportLink" class="btn btn-primary btn-block" href="report.php" target="_blank" rel="noopener">PDF erstellen</a>
+		</div>
+	</div>
+</div>
+
 <!-- Modal: Zählerstände verwalten -->
 <div class="modal-overlay" id="readingsModal">
 	<div class="modal-box wide">
@@ -177,6 +198,8 @@ Auth::requirePage();
 	document.getElementById('modalClose').innerHTML = icon('close');
 	document.getElementById('readingsClose').innerHTML = icon('close');
 	document.getElementById('listIcon').innerHTML = icon('list');
+	document.getElementById('reportIcon').innerHTML = icon('file');
+	document.getElementById('reportClose').innerHTML = icon('close');
 	const lo = document.getElementById('logoutIcon'); if (lo) lo.innerHTML = icon('logout');
 </script>
 </body>

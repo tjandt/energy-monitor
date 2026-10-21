@@ -44,6 +44,7 @@ $utilities = Config::get('utilities');
 		💡 Preise werden intern in <strong>Cent</strong> gespeichert (z.B. 3250 = 32,50&nbsp;€). Ein Tarif gilt ab
 		„Gültig von“ bis „Gültig bis“ (leer = unbegrenzt). Bei mehreren gültigen Einträgen für denselben
 		Zeitraum wird immer der zuletzt begonnene verwendet.
+		Der <strong>Abschlag</strong> (in Euro) ist nur bei Strom möglich – Wasser und Wärme laufen über die Nebenkosten.
 	</div>
 
 	<div class="table-card">
@@ -55,12 +56,13 @@ $utilities = Config::get('utilities');
 					<th>Gültig bis</th>
 					<th>Preis / Einheit</th>
 					<th>Grundgebühr / Monat</th>
+					<th>Abschlag / Monat</th>
 					<th>Status</th>
 					<th></th>
 				</tr>
 			</thead>
 			<tbody id="tariffTableBody">
-				<tr><td colspan="7" style="text-align:center; color:var(--text-secondary); padding:30px">Lade…</td></tr>
+				<tr><td colspan="8" style="text-align:center; color:var(--text-secondary); padding:30px">Lade…</td></tr>
 			</tbody>
 		</table>
 	</div>
@@ -106,6 +108,11 @@ $utilities = Config::get('utilities');
 			<div class="field">
 				<label>Grundgebühr pro Monat (Cent)</label>
 				<input type="number" step="0.01" name="base_price_monthly" id="tariffBasePrice" class="input" placeholder="z.B. 1200 für 12,00 €/Monat" required>
+			</div>
+
+			<div class="field d-none" id="advanceField">
+				<label>Monatlicher Abschlag (€, optional)</label>
+				<input type="number" step="0.01" min="0" name="advance_monthly" id="tariffAdvance" class="input" placeholder="z.B. 95 für 95,00 €/Monat">
 			</div>
 
 			<div class="modal-actions">

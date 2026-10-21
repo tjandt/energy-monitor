@@ -11,6 +11,7 @@ ini_set('display_errors', '1');
 require_once __DIR__ . '/../includes/EnergyService.php';
 require_once __DIR__ . '/../includes/WeatherImporter.php';
 require_once __DIR__ . '/../includes/Auth.php';
+require_once __DIR__ . '/../includes/YearReportPdf.php';
 
 $config = require __DIR__ . '/../config.php';
 Config::override($config);
@@ -38,7 +39,7 @@ function newDb(): PDO {
 		PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
 	]);
 	$pdo->exec('CREATE TABLE meter_readings (id INTEGER PRIMARY KEY AUTOINCREMENT, utility_type TEXT, reading_date TEXT, counter_value REAL)');
-	$pdo->exec('CREATE TABLE tariffs (id INTEGER PRIMARY KEY AUTOINCREMENT, utility_type TEXT, valid_from TEXT, valid_to TEXT, price_per_unit REAL, base_price_monthly REAL)');
+	$pdo->exec('CREATE TABLE tariffs (id INTEGER PRIMARY KEY AUTOINCREMENT, utility_type TEXT, valid_from TEXT, valid_to TEXT, price_per_unit REAL, base_price_monthly REAL, advance_monthly REAL NOT NULL DEFAULT 0)');
 	$pdo->exec('CREATE TABLE weather_data (date TEXT PRIMARY KEY, avg_temp REAL)');
 	return $pdo;
 }
@@ -263,6 +264,76 @@ $svc->saveTariff(['utility_type' => 'Strom', 'valid_from' => '2020-01-01', 'pric
 $ykc = $svc->getYearComparison('Strom', 'cost', true);
 near('Jahresvergleich Kosten kumuliert: Jan = 310×0,10 + 1,00', $ykc['series'][0]['values'][0], 32.0, 0.01);
 check('Jahresvergleich ohne Daten', (new EnergyService(newDb(), $config))->getYearComparison('Strom')['series'] === []);
+
+// ---------------------------------------------------------------- Abschlag (Strom)
+$pdo = newDb();
+$st = $pdo->prepare('INSERT INTO meter_readings (utility_type, reading_date, counter_value) VALUES (?,?,?)');
+$v = 0; $pdo->beginTransaction();
+for ($d = new DateTime(($thisYear - 2) . '-01-01'); $d <= new DateTime('now'); $d->modify('+1 day')) { $st->execute(['Strom', $d->format('Y-m-d 00:00:00'), $v]); $v += 10; }
+$pdo->commit();
+$svc = new EnergyService($pdo, $config);
+check('Abschlag: ohne Tarif kein Check', $svc->advanceCheck('Strom') === null);
+$svc->saveTariff(['utility_type' => 'Strom', 'valid_from' => ($thisYear - 2) . '-01-01', 'price_per_unit' => '30', 'base_price_monthly' => '1000', 'advance_monthly' => '90']);
+$adv = $svc->advanceCheck('Strom');
+check('Abschlag: Check vorhanden', is_array($adv), json_encode($adv));
+if (is_array($adv)) {
+	$daysYear = (int) date('z', strtotime("$thisYear-12-31")) + 1;
+	near('Abschlag: Summe 12 × 90', $adv['advance_total'], 1080);
+	near('Abschlag: erwartete Kosten ≈ Jahr × 10 kWh × 0,30 € + 12 × 10 €', $adv['expected_cost'], $daysYear * 10 * 0.30 + 120, 25);
+	check('Abschlag: Nachzahlung (Saldo < 0)', $adv['balance'] < 0, (string) $adv['balance']);
+	near('Abschlag: Empfehlung ≈ Kosten/12 aufgerundet', $adv['suggested_monthly'], ceil($adv['expected_cost'] / 12), 0.01);
+	check('Abschlag: bezahlt ≤ gesamt', $adv['advance_paid'] > 0 && $adv['advance_paid'] <= $adv['advance_total']);
+	check('Abschlag: in der Kachel enthalten', is_array($svc->getPeriodComparison('Strom', 'month')['advance']));
+	check('Abschlag: Wasser hat keinen', $svc->getPeriodComparison('Wasser', 'month')['advance'] === null);
+}
+$svc->saveTariff(['utility_type' => 'Strom', 'valid_from' => ($thisYear - 2) . '-01-01', 'price_per_unit' => '30', 'base_price_monthly' => '1000', 'advance_monthly' => '150', 'id' => $pdo->query("SELECT id FROM tariffs LIMIT 1")->fetchColumn()]);
+check('Abschlag: Tarif geändert -> Guthaben', ($svc->advanceCheck('Strom')['balance'] ?? -1) > 0);
+throwsA('Abschlag: negativ', InvalidArgumentException::class, fn() => $svc->saveTariff(['utility_type' => 'Strom', 'valid_from' => '2025-01-01', 'price_per_unit' => '30', 'base_price_monthly' => '0', 'advance_monthly' => '-5']));
+$svc->saveTariff(['utility_type' => 'Wasser', 'valid_from' => '2025-01-01', 'price_per_unit' => '300', 'base_price_monthly' => '0', 'advance_monthly' => '50']);
+check('Abschlag: bei Wasser ignoriert', (float) $pdo->query("SELECT advance_monthly FROM tariffs WHERE utility_type = 'Wasser'")->fetchColumn() === 0.0);
+// abweichendes Abrechnungsjahr (Start im Juli)
+$cfgJul = $config; $cfgJul['utilities']['Strom']['billing_start_month'] = 7;
+$advJul = (new EnergyService($pdo, $cfgJul))->advanceCheck('Strom', new DateTime(($thisYear) . '-03-15'));
+check('Abschlag: Abrechnungsjahr ab Juli', is_array($advJul) && $advJul['period_start'] === ($thisYear - 1) . '-07-01' && $advJul['period_end'] === $thisYear . '-06-30', json_encode($advJul));
+
+// Rückwärtskompatibel: DB ohne Spalte advance_monthly
+$old = newDb(); $old->exec('DROP TABLE tariffs'); $old->exec('CREATE TABLE tariffs (id INTEGER PRIMARY KEY AUTOINCREMENT, utility_type TEXT, valid_from TEXT, valid_to TEXT, price_per_unit REAL, base_price_monthly REAL)');
+$svcOld = new EnergyService($old, $config);
+$svcOld->saveTariff(['utility_type' => 'Strom', 'valid_from' => '2025-01-01', 'price_per_unit' => '30', 'base_price_monthly' => '100']);
+check('Ohne Migration: Tarife weiter les-/speicherbar', count($svcOld->getTariffs()) === 1);
+throwsA('Ohne Migration: Abschlag > 0 meldet fehlende Migration', RuntimeException::class, fn() => $svcOld->saveTariff(['utility_type' => 'Strom', 'valid_from' => '2025-02-01', 'price_per_unit' => '30', 'base_price_monthly' => '100', 'advance_monthly' => '80']));
+
+// ---------------------------------------------------------------- Jahresbericht
+$pdo = newDb();
+$st = $pdo->prepare('INSERT INTO meter_readings (utility_type, reading_date, counter_value) VALUES (?,?,?)');
+$v = 0; $pdo->beginTransaction();
+$lastYear = $thisYear - 1;
+for ($d = new DateTime(($thisYear - 2) . '-01-01'); $d <= new DateTime('now'); $d->modify('+1 day')) {
+	$st->execute(['Strom', $d->format('Y-m-d 00:00:00'), $v]);
+	$v += ((int) $d->format('Y') === $lastYear) ? 12 : 10; // Vorjahr: 12 kWh/Tag, sonst 10
+}
+$pdo->commit();
+$svc = new EnergyService($pdo, $config);
+$svc->saveTariff(['utility_type' => 'Strom', 'valid_from' => ($thisYear - 2) . '-01-01', 'price_per_unit' => '30', 'base_price_monthly' => '1000', 'advance_monthly' => '100']);
+check('Berichtsjahre', $svc->getReportYears() === range($thisYear, $thisYear - 2), json_encode($svc->getReportYears()));
+$rep = $svc->getYearReport($lastYear);
+$strom = $rep['utilities'][0];
+check('Bericht: nur Zähler mit Daten', count($rep['utilities']) === 1 && $strom['type'] === 'Strom');
+$daysLast = (int) date('z', strtotime("$lastYear-12-31")) + 1;
+near('Bericht: Jahresverbrauch', $strom['usage'], 12 * $daysLast, 1);
+check('Bericht: 12 vollständige Monate', $strom['complete_months'] === 12 && $strom['cmp_months'] === 12);
+near('Bericht: Veränderung ggü. Vorjahr', $strom['change_pct'], (12 * $daysLast / (10 * (int) date('z', strtotime(($lastYear - 1) . '-12-31')) + 10 * 1) - 1) * 100, 0.2);
+near('Bericht: Kosten = Verbrauch × 0,30 + 12 × 10 €', $strom['cost'], 12 * $daysLast * 0.30 + 120, 0.05);
+near('Bericht: Abschlag-Saldo = 1200 − Kosten', $strom['advance']['balance'], 1200 - $strom['cost'], 0.05);
+$repNow = $svc->getYearReport($thisYear);
+check('Bericht laufendes Jahr: unvollständig gekennzeichnet', $repNow['utilities'][0]['complete_months'] < 12 && $repNow['utilities'][0]['advance']['balance'] === null);
+throwsA('Bericht: Zukunftsjahr', InvalidArgumentException::class, fn() => $svc->getYearReport($thisYear + 1));
+$pdfData = (new YearReportPdf($rep))->Output('S');
+check('PDF: gültiger Header', str_starts_with($pdfData, '%PDF-'));
+check('PDF: 2 Seiten (Übersicht + Strom)', preg_match_all('#/Type /Page\b#', $pdfData) === 2, (string) preg_match_all('#/Type /Page\b#', $pdfData));
+$pdfNow = (new YearReportPdf($repNow))->Output('S');
+check('PDF laufendes Jahr erzeugbar', str_starts_with($pdfNow, '%PDF-'));
+check('PDF ohne Daten erzeugbar', str_starts_with((new YearReportPdf((new EnergyService(newDb(), $config))->getYearReport($lastYear)))->Output('S'), '%PDF-'));
 
 // ---------------------------------------------------------------- Auth
 $hash = password_hash('geheim', PASSWORD_DEFAULT);

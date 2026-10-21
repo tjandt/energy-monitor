@@ -17,6 +17,7 @@ class EnergyApp {
 		this.seq = { dashboard: 0, chart: 0 }; // verwirft veraltete Antworten bei schnellem Umschalten
 		this.readingModal = EM.modal('readingModal');
 		this.readingsModal = EM.modal('readingsModal');
+		this.reportModal = EM.modal('reportModal');
 		this.readingsPaging = { type: null, offset: 0, pageSize: 25 };
 
 		EM.initTheme(() => this.lastChartData && (this.state.chartView === 'years' ? this.renderYearComparison(this.lastChartData) : this.renderChart(this.lastChartData)));
@@ -36,6 +37,10 @@ class EnergyApp {
 		$('modalCancel').addEventListener('click', () => this.readingModal.close());
 		$('readingForm').addEventListener('submit', (e) => this.saveReading(e));
 		$('readingsBtn').addEventListener('click', () => this.openReadings(this.state.selectedType));
+		$('reportBtn').addEventListener('click', () => this.openReport());
+		$('reportClose').addEventListener('click', () => this.reportModal.close());
+		$('reportYear').addEventListener('change', () => this.updateReportLink());
+		$('reportLink').addEventListener('click', () => setTimeout(() => this.reportModal.close(), 200));
 		$('readingsClose').addEventListener('click', () => this.readingsModal.close());
 		$('readingsType').addEventListener('change', (e) => this.loadReadings(e.target.value, true));
 		$('readingsMore').addEventListener('click', () => this.loadReadings(this.readingsPaging.type, false));
@@ -156,6 +161,7 @@ class EnergyApp {
 				<div class="compare-label" style="margin-bottom:6px">Vergleich (${granLabel})</div>
 				<div class="compare-row">${compareHtml}</div>
 				${this.weatherAdjustedHtml(item)}
+				${this.advanceHtml(item)}
 			</div>`;
 	}
 
@@ -167,6 +173,19 @@ class EnergyApp {
 		return `<div class="weather-adj" title="Verbrauch je Gradtag (VDI 3807), bisheriger Verlauf der Periode ggü. gleichem Zeitabschnitt im Vorjahr">
 			🌡️ Witterungsbereinigt: <strong class="${cls}">${sign}${EM.fmt(w.change_pct)} %</strong> ggü. Vorjahr
 			(${EM.fmt(w.specific, 2)} vs. ${EM.fmt(w.specific_prev, 2)} ${EM.escape(w.unit)}; ${w.gt} vs. ${w.gt_prev} Gt)
+		</div>`;
+	}
+
+	advanceHtml(item) {
+		const a = item.advance;
+		if (!a) return '';
+		const nachzahlung = a.balance < 0;
+		const status = Math.abs(a.balance) < 1 ? 'ausgeglichen'
+			: `${nachzahlung ? 'Nachzahlung' : 'Guthaben'} ≈ <strong class="${nachzahlung ? 'bad' : 'good'}">${EM.fmtMoney(Math.abs(a.balance))}</strong>`;
+		const hint = a.suggested_monthly !== Math.round(a.advance_monthly)
+			? ` · Empfehlung: ${EM.fmtMoney(a.suggested_monthly)}/Monat` : '';
+		return `<div class="weather-adj" title="Abrechnungsjahr ${EM.fmtDate(a.period_start)} – ${EM.fmtDate(a.period_end)}: Summe der Abschläge ${EM.fmtMoney(a.advance_total)} gegen erwartete Kosten ${EM.fmtMoney(a.expected_cost)}">
+			💶 Abschlag ${EM.fmtMoney(a.advance_monthly)}/Monat: ${status}${hint}${a.tariff_missing ? ' (Tarif unvollständig)' : ''}
 		</div>`;
 	}
 
@@ -419,6 +438,29 @@ class EnergyApp {
 		$('inputValue').value = reading ? EM.fmtFixed(reading.counter_value, 0, 3) : '';
 		this.readingModal.open();
 		$('inputValue').focus();
+	}
+
+	// ------------------------------------------------------------------
+	// Jahresbericht (PDF)
+	// ------------------------------------------------------------------
+	async openReport() {
+		this.reportModal.open();
+		const sel = document.getElementById('reportYear');
+		try {
+			const { years } = await EM.api('get_report_years');
+			sel.innerHTML = years.map((y) => `<option value="${y}">${y}</option>`).join('');
+			// vorbelegt: letztes abgeschlossenes Jahr, falls vorhanden
+			const lastDone = String(new Date().getFullYear() - 1);
+			if (years.map(String).includes(lastDone)) sel.value = lastDone;
+		} catch (e) {
+			EM.toast('Fehler beim Laden der Jahre: ' + e.message);
+		}
+		this.updateReportLink();
+	}
+
+	updateReportLink() {
+		const year = document.getElementById('reportYear').value;
+		document.getElementById('reportLink').href = `report.php?year=${encodeURIComponent(year)}`;
 	}
 
 	// ------------------------------------------------------------------

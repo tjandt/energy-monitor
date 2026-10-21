@@ -58,7 +58,8 @@ class EnergyService {
 	public function getUtilities(): array {
 		$out = [];
 		foreach ($this->utilities as $key => $u) {
-			$out[$key] = ['label' => $u['label'], 'unit' => $u['unit'], 'color' => $u['color'], 'icon' => $u['icon']];
+			$out[$key] = ['label' => $u['label'], 'unit' => $u['unit'], 'color' => $u['color'], 'icon' => $u['icon'],
+				'advance' => !empty($u['advance'])];
 		}
 		return $out;
 	}
@@ -129,6 +130,7 @@ class EnergyService {
 			'compare'            => $compare,
 			'trend'              => $this->calcTrend($forecast['estimate'], $compare[0]['value']),
 			'weather_adjusted'   => $this->weatherAdjusted($type, $granularity, $now, $forecast),
+			'advance'            => !empty($meta['advance']) ? $this->advanceCheck($type) : null,
 			'cost_estimate'      => $this->periodCost($type, $forecast['estimate'], $now, $granularity),
 		];
 	}
@@ -179,6 +181,76 @@ class EnergyService {
 			'gt'            => (int) round($gt),
 			'gt_prev'       => (int) round($gtPrev),
 			'unit'          => $this->utilities[$type]['unit'] . '/Gt',
+		];
+	}
+
+	/**
+	 * Abschlags-Check für das laufende Abrechnungsjahr: Summe der Abschläge
+	 * gegen die erwarteten Kosten (Ist-Verbrauch + Prognose, jeweils zum
+	 * Tarif des Monats) -> erwartete Nach-/Rückzahlung. null ohne Abschlag.
+	 */
+	public function advanceCheck(string $type, ?DateTimeInterface $now = null): ?array {
+		$now = $now ? DateTime::createFromInterface($now) : new DateTime();
+		$startMonth = max(1, min(12, (int) ($this->utilities[$type]['billing_start_month'] ?? 1)));
+		$year = (int) $now->format('Y') - ((int) $now->format('n') < $startMonth ? 1 : 0);
+		$pStart = new DateTime(sprintf('%d-%02d-01', $year, $startMonth));
+
+		$first = $this->readings->firstTimestamp($type);
+		$last = $this->readings->lastTimestamp($type);
+		if ($first === null) return null;
+		$forecast = $this->forecaster->longTerm($type, 24)['forecast'];
+
+		$months = [];
+		$known = [];
+		for ($i = 0; $i < 12; $i++) {
+			$mStart = (clone $pStart)->modify("+{$i} month");
+			$mEnd = (clone $mStart)->modify('+1 month');
+			$sTs = $mStart->getTimestamp();
+			$eTs = $mEnd->getTimestamp();
+			$ym = $mStart->format('Y-m');
+
+			if ($sTs >= $first && $eTs <= $last) {
+				$cons = $this->readings->consumption($type, $sTs, $eTs);
+				$known[] = $cons;
+			} elseif ($sTs < $last && $eTs > $first) {
+				// angebrochener Monat: mindestens das, was schon verbraucht wurde
+				$cons = max($this->readings->consumption($type, $sTs, $eTs, true), $forecast[$ym] ?? 0.0);
+			} else {
+				$cons = $forecast[$ym] ?? null;
+			}
+			$months[] = ['start' => $mStart, 'cons' => $cons];
+		}
+		if (!$known && !array_filter($months, fn($m) => $m['cons'] !== null)) return null;
+		$avgKnown = $known ? array_sum($known) / count($known) : 0.0;
+
+		$expected = 0.0;
+		$advanceTotal = 0.0;
+		$advancePaid = 0.0;
+		$consumption = 0.0;
+		$tariffMissing = false;
+		foreach ($months as $m) {
+			$cons = $m['cons'] ?? $avgKnown; // Monate ohne Prognose/Daten: Durchschnitt der bekannten Monate
+			$consumption += $cons;
+			$date = $m['start']->format('Y-m-d');
+			$cost = $this->tariffs->cost($type, $cons, $date, 1.0);
+			if ($cost === null) $tariffMissing = true; else $expected += $cost;
+			$adv = $this->tariffs->advanceAt($type, $date);
+			$advanceTotal += $adv;
+			if ($m['start']->getTimestamp() <= $now->getTimestamp()) $advancePaid += $adv;
+		}
+		if ($advanceTotal <= 0) return null;
+
+		return [
+			'period_start'     => $pStart->format('Y-m-d'),
+			'period_end'       => (clone $pStart)->modify('+1 year -1 day')->format('Y-m-d'),
+			'advance_monthly'  => round($this->tariffs->advanceAt($type, $now->format('Y-m-d')), 2),
+			'advance_paid'     => round($advancePaid, 2),
+			'advance_total'    => round($advanceTotal, 2),
+			'expected_cost'    => round($expected, 2),
+			'expected_consumption' => round($consumption, 1),
+			'balance'          => round($advanceTotal - $expected, 2), // >0 Guthaben, <0 Nachzahlung
+			'suggested_monthly' => (int) ceil($expected / 12),
+			'tariff_missing'   => $tariffMissing,
 		];
 	}
 
@@ -404,6 +476,116 @@ class EnergyService {
 			'color'      => $meta['color'],
 			'cumulative' => $cumulative,
 		];
+	}
+
+	// =====================================================================
+	// JAHRESBERICHT
+	// =====================================================================
+
+	/** Jahre, für die mindestens ein Zähler Daten hat (absteigend). */
+	public function getReportYears(): array {
+		$minYear = null;
+		foreach ($this->getUtilityKeys() as $type) {
+			$ts = $this->readings->firstTimestamp($type);
+			if ($ts !== null) $minYear = min($minYear ?? PHP_INT_MAX, (int) date('Y', $ts));
+		}
+		return $minYear === null ? [] : range((int) date('Y'), $minYear);
+	}
+
+	/**
+	 * Alle Zahlen für den Jahresbericht (PDF). Es zählen nur vollständig durch
+	 * Ablesungen abgedeckte Monate; Vorjahresvergleiche beziehen sich nur auf
+	 * Monate, die in beiden Jahren vollständig sind ("cmp_*").
+	 */
+	public function getYearReport(int $year): array {
+		if ($year < 1990 || $year > (int) date('Y')) {
+			throw new InvalidArgumentException('Ungültiges Berichtsjahr');
+		}
+		$now = new DateTime();
+		$report = ['year' => $year, 'generated_at' => $now->format('Y-m-d H:i'), 'utilities' => [],
+			'total_cost' => 0.0, 'total_cmp_cost' => 0.0, 'total_cmp_prev_cost' => 0.0];
+		$lastAny = null;
+
+		foreach ($this->utilities as $type => $meta) {
+			$first = $this->readings->firstTimestamp($type);
+			$last = $this->readings->lastTimestamp($type);
+			if ($first === null) continue;
+			$lastAny = max($lastAny ?? 0, $last);
+
+			$cur = $this->reportMonths($type, $year, $first, $last);
+			$prev = $this->reportMonths($type, $year - 1, $first, $last);
+
+			$u = ['type' => $type, 'label' => $meta['label'], 'unit' => $meta['unit'], 'color' => $meta['color'],
+				'months' => [], 'usage' => 0.0, 'cost' => null, 'complete_months' => 0,
+				'cmp_usage' => 0.0, 'cmp_prev_usage' => 0.0, 'cmp_cost' => null, 'cmp_prev_cost' => null,
+				'cmp_months' => 0, 'advance' => null, 'weather' => null];
+
+			for ($m = 0; $m < 12; $m++) {
+				$c = $cur[$m];
+				$p = $prev[$m];
+				$u['months'][] = ['usage' => $c['usage'], 'cost' => $c['cost'], 'prev_usage' => $p['usage'], 'prev_cost' => $p['cost']];
+				if ($c['usage'] === null) continue;
+				$u['complete_months']++;
+				$u['usage'] += $c['usage'];
+				if ($c['cost'] !== null) $u['cost'] = ($u['cost'] ?? 0.0) + $c['cost'];
+				if ($p['usage'] !== null) {
+					$u['cmp_months']++;
+					$u['cmp_usage'] += $c['usage'];
+					$u['cmp_prev_usage'] += $p['usage'];
+					if ($c['cost'] !== null && $p['cost'] !== null) {
+						$u['cmp_cost'] = ($u['cmp_cost'] ?? 0.0) + $c['cost'];
+						$u['cmp_prev_cost'] = ($u['cmp_prev_cost'] ?? 0.0) + $p['cost'];
+					}
+				}
+			}
+			$u['change_pct'] = $u['cmp_prev_usage'] > 0 ? round(($u['cmp_usage'] / $u['cmp_prev_usage'] - 1) * 100, 1) : null;
+
+			// Strom: Abschläge des Kalenderjahres gegen die tatsächlichen Kosten
+			if (!empty($meta['advance']) && $u['cost'] !== null) {
+				$advance = 0.0;
+				for ($m = 1; $m <= 12; $m++) {
+					$advance += $this->tariffs->advanceAt($type, sprintf('%d-%02d-01', $year, $m));
+				}
+				if ($advance > 0) {
+					$u['advance'] = ['total' => round($advance, 2), 'complete' => $u['complete_months'] === 12,
+						'balance' => $u['complete_months'] === 12 ? round($advance - $u['cost'], 2) : null];
+				}
+			}
+			// Wärme: Verbrauch je Gradtag, nur bei vollständigem Jahr und Wetterdaten
+			if (!empty($meta['degree_day_adjust']) && $u['complete_months'] === 12 && $prev && !in_array(null, array_column($prev, 'usage'), true)) {
+				$gt = $this->degreeDays->between(new DateTime("$year-01-01"), new DateTime(($year + 1) . '-01-01'));
+				$gtPrev = $this->degreeDays->between(new DateTime(($year - 1) . '-01-01'), new DateTime("$year-01-01"));
+				$prevUsage = array_sum(array_column($prev, 'usage'));
+				if ($gt && $gtPrev && $u['usage'] > 0 && $prevUsage > 0) {
+					$u['weather'] = ['gt' => (int) round($gt), 'gt_prev' => (int) round($gtPrev),
+						'specific' => round($u['usage'] / $gt, 3), 'specific_prev' => round($prevUsage / $gtPrev, 3),
+						'change_pct' => round((($u['usage'] / $gt) / ($prevUsage / $gtPrev) - 1) * 100, 1)];
+				}
+			}
+
+			$report['utilities'][] = $u;
+			if ($u['cost'] !== null) $report['total_cost'] += $u['cost'];
+			if ($u['cmp_cost'] !== null) {
+				$report['total_cmp_cost'] += $u['cmp_cost'];
+				$report['total_cmp_prev_cost'] += $u['cmp_prev_cost'];
+			}
+		}
+		$report['data_until'] = $lastAny ? date('Y-m-d', $lastAny) : null;
+		return $report;
+	}
+
+	/** @return array<int, array{usage: ?float, cost: ?float}> 12 Monate; null = nicht vollständig erfasst */
+	private function reportMonths(string $type, int $year, int $first, int $last): array {
+		$out = [];
+		for ($m = 1; $m <= 12; $m++) {
+			$start = new DateTime(sprintf('%d-%02d-01', $year, $m));
+			$sTs = $start->getTimestamp();
+			$eTs = (clone $start)->modify('+1 month')->getTimestamp();
+			if ($sTs < $first || $eTs > $last) { $out[] = ['usage' => null, 'cost' => null]; continue; }
+			$usage = $this->readings->consumption($type, $sTs, $eTs);
+			$out[] = ['usage' => $usage, 'cost' => $this->tariffs->cost($type, $usage, $start->format('Y-m-d'), 1.0)];
+		}
+		return $out;
 	}
 
 	// =====================================================================
