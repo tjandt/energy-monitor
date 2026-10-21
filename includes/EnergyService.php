@@ -186,72 +186,141 @@ class EnergyService {
 
 	/**
 	 * Abschlags-Check für das laufende Abrechnungsjahr: Summe der Abschläge
-	 * gegen die erwarteten Kosten (Ist-Verbrauch + Prognose, jeweils zum
-	 * Tarif des Monats) -> erwartete Nach-/Rückzahlung. null ohne Abschlag.
+	 * gegen die erwarteten Kosten -> erwartete Nach-/Rückzahlung.
+	 *
+	 * Tarifänderungen im Jahr (Arbeits-/Grundpreis oder Abschlag) werden
+	 * tagesgenau berücksichtigt: Das Jahr wird an Monatsgrenzen und
+	 * Tarifwechseln in Abschnitte zerlegt; jeder Abschnitt wird mit dem dort
+	 * gültigen Tarif bewertet (Ist-Verbrauch, ab der letzten Ablesung
+	 * Prognose). Jeder Abschlag wird mit dem Tarif bewertet, der an seinem
+	 * Fälligkeitstag (config 'advance_due_day') gilt.
 	 */
 	public function advanceCheck(string $type, ?DateTimeInterface $now = null): ?array {
 		$now = $now ? DateTime::createFromInterface($now) : new DateTime();
 		$startMonth = max(1, min(12, (int) ($this->utilities[$type]['billing_start_month'] ?? 1)));
 		$year = (int) $now->format('Y') - ((int) $now->format('n') < $startMonth ? 1 : 0);
 		$pStart = new DateTime(sprintf('%d-%02d-01', $year, $startMonth));
+		$pEnd = (clone $pStart)->modify('+1 year');
 
 		$first = $this->readings->firstTimestamp($type);
 		$last = $this->readings->lastTimestamp($type);
 		if ($first === null) return null;
 		$forecast = $this->forecaster->longTerm($type, 24)['forecast'];
 
-		$months = [];
-		$known = [];
-		for ($i = 0; $i < 12; $i++) {
-			$mStart = (clone $pStart)->modify("+{$i} month");
-			$mEnd = (clone $mStart)->modify('+1 month');
-			$sTs = $mStart->getTimestamp();
-			$eTs = $mEnd->getTimestamp();
-			$ym = $mStart->format('Y-m');
-
-			if ($sTs >= $first && $eTs <= $last) {
-				$cons = $this->readings->consumption($type, $sTs, $eTs);
-				$known[] = $cons;
-			} elseif ($sTs < $last && $eTs > $first) {
-				// angebrochener Monat: mindestens das, was schon verbraucht wurde
-				$cons = max($this->readings->consumption($type, $sTs, $eTs, true), $forecast[$ym] ?? 0.0);
-			} else {
-				$cons = $forecast[$ym] ?? null;
-			}
-			$months[] = ['start' => $mStart, 'cons' => $cons];
+		// durchschnittlicher Tagesverbrauch der abgedeckten Zeit als Rückfall
+		$covFrom = max($first, $pStart->getTimestamp());
+		$covTo = min($last, $pEnd->getTimestamp());
+		$avgDaily = null;
+		if ($covTo > $covFrom) {
+			$avgDaily = $this->readings->consumption($type, $covFrom, $covTo) / (($covTo - $covFrom) / 86400);
+		} elseif ($history = $this->forecaster->monthlyHistory($type)) {
+			$avgDaily = array_sum($history) / (count($history) * 30.44);
 		}
-		if (!$known && !array_filter($months, fn($m) => $m['cons'] !== null)) return null;
-		$avgKnown = $known ? array_sum($known) / count($known) : 0.0;
+		if ($avgDaily === null && !$forecast) return null;
 
 		$expected = 0.0;
-		$advanceTotal = 0.0;
-		$advancePaid = 0.0;
 		$consumption = 0.0;
 		$tariffMissing = false;
-		foreach ($months as $m) {
-			$cons = $m['cons'] ?? $avgKnown; // Monate ohne Prognose/Daten: Durchschnitt der bekannten Monate
+		foreach ($this->segments($type, $pStart, $pEnd) as [$a, $b]) {
+			$aTs = $a->getTimestamp();
+			$bTs = $b->getTimestamp();
+			$dim = (int) $a->format('t');
+			$ym = $a->format('Y-m');
+			$rate = isset($forecast[$ym]) ? $forecast[$ym] / $dim : ($avgDaily ?? 0.0); // je Tag
+			$days = ($bTs - $aTs) / 86400;
+
+			if ($aTs >= $first && $bTs <= $last) {
+				$cons = $this->readings->consumption($type, $aTs, $bTs);          // Ist
+			} elseif ($bTs <= $first) {
+				$cons = ($avgDaily ?? $rate) * $days;                                // vor der ersten Ablesung unbekannt
+			} elseif ($aTs >= $last) {
+				$cons = $rate * $days;                                               // Zukunft: Prognose
+			} else {                                                                 // Abschnitt enthält die letzte Ablesung
+				$cons = $this->readings->consumption($type, max($aTs, $first), $last, true)
+					+ $rate * (($bTs - $last) / 86400);
+			}
 			$consumption += $cons;
-			$date = $m['start']->format('Y-m-d');
-			$cost = $this->tariffs->cost($type, $cons, $date, 1.0);
+			$cost = $this->tariffs->cost($type, $cons, $a->format('Y-m-d'), $days / $dim);
 			if ($cost === null) $tariffMissing = true; else $expected += $cost;
-			$adv = $this->tariffs->advanceAt($type, $date);
-			$advanceTotal += $adv;
-			if ($m['start']->getTimestamp() <= $now->getTimestamp()) $advancePaid += $adv;
+		}
+
+		$advanceTotal = 0.0;
+		$advancePaid = 0.0;
+		$remaining = 0;
+		$changes = [];
+		$prevAmount = null;
+		foreach ($this->advanceSchedule($type, $pStart) as ['due' => $due, 'amount' => $amount]) {
+			$advanceTotal += $amount;
+			if ($due->getTimestamp() <= $now->getTimestamp()) $advancePaid += $amount; else $remaining++;
+			if ($prevAmount !== null && abs($amount - $prevAmount) > 0.004) {
+				$changes[] = ['from' => $due->format('Y-m-d'), 'amount' => round($amount, 2)];
+			}
+			$prevAmount = $amount;
 		}
 		if ($advanceTotal <= 0) return null;
 
+		$next = null;
+		foreach ($changes as $c) {
+			if ($c['from'] > $now->format('Y-m-d')) { $next = $c; break; }
+		}
+
 		return [
 			'period_start'     => $pStart->format('Y-m-d'),
-			'period_end'       => (clone $pStart)->modify('+1 year -1 day')->format('Y-m-d'),
+			'period_end'       => (clone $pEnd)->modify('-1 day')->format('Y-m-d'),
 			'advance_monthly'  => round($this->tariffs->advanceAt($type, $now->format('Y-m-d')), 2),
+			'advance_next'     => $next,      // nächste Änderung des Abschlags im Abrechnungsjahr
+			'advance_changes'  => $changes,
 			'advance_paid'     => round($advancePaid, 2),
 			'advance_total'    => round($advanceTotal, 2),
 			'expected_cost'    => round($expected, 2),
 			'expected_consumption' => round($consumption, 1),
 			'balance'          => round($advanceTotal - $expected, 2), // >0 Guthaben, <0 Nachzahlung
-			'suggested_monthly' => (int) ceil($expected / 12),
+			// Abschlag, der ab sofort für die restlichen Zahlungen nötig wäre (sonst Jahreskosten/12)
+			'remaining_payments' => $remaining,
+			'suggested_monthly' => $remaining > 0
+				? max(0, (int) ceil(($expected - $advancePaid) / $remaining))
+				: (int) ceil($expected / 12),
 			'tariff_missing'   => $tariffMissing,
 		];
+	}
+
+	/**
+	 * Die 12 Abschlagszahlungen eines Abrechnungsjahres: Fälligkeitstag
+	 * (config 'advance_due_day') und der dann gültige Abschlag.
+	 * @return array<int, array{due: DateTime, amount: float}>
+	 */
+	private function advanceSchedule(string $type, DateTimeInterface $pStart): array {
+		$dueDay = max(1, min(28, (int) ($this->utilities[$type]['advance_due_day'] ?? 1)));
+		$out = [];
+		$base = DateTime::createFromInterface($pStart);
+		for ($i = 0; $i < 12; $i++) {
+			$month = (clone $base)->modify("+{$i} month");
+			$due = (clone $month)->setDate((int) $month->format('Y'), (int) $month->format('n'), $dueDay);
+			$out[] = ['due' => $due, 'amount' => $this->tariffs->advanceAt($type, $due->format('Y-m-d'))];
+		}
+		return $out;
+	}
+
+	/**
+	 * Zerlegt [$from, $to) an Monatsgrenzen und Tarifwechseln. Innerhalb eines
+	 * Abschnitts ist der Tarif konstant und es gibt keinen Monatswechsel.
+	 * @return array<int, array{0: DateTime, 1: DateTime}>
+	 */
+	private function segments(string $type, DateTimeInterface $from, DateTimeInterface $to): array {
+		$fromD = DateTime::createFromInterface($from);
+		$toD = DateTime::createFromInterface($to);
+		$points = [$fromD->format('Y-m-d') => true, $toD->format('Y-m-d') => true];
+		for ($m = (clone $fromD)->modify('first day of next month'); $m < $toD; $m->modify('first day of next month')) {
+			$points[$m->format('Y-m-d')] = true;
+		}
+		foreach ($this->tariffs->changeDates($type) as $d) {
+			if ($d > $fromD->format('Y-m-d') && $d < $toD->format('Y-m-d')) $points[$d] = true;
+		}
+		ksort($points);
+		$dates = array_map(fn($d) => new DateTime($d), array_keys($points));
+		$out = [];
+		for ($i = 0; $i + 1 < count($dates); $i++) $out[] = [$dates[$i], $dates[$i + 1]];
+		return $out;
 	}
 
 	private function calcTrend(float $current, float $reference): string {
@@ -542,10 +611,7 @@ class EnergyService {
 
 			// Strom: Abschläge des Kalenderjahres gegen die tatsächlichen Kosten
 			if (!empty($meta['advance']) && $u['cost'] !== null) {
-				$advance = 0.0;
-				for ($m = 1; $m <= 12; $m++) {
-					$advance += $this->tariffs->advanceAt($type, sprintf('%d-%02d-01', $year, $m));
-				}
+				$advance = array_sum(array_column($this->advanceSchedule($type, new DateTime("$year-01-01")), 'amount'));
 				if ($advance > 0) {
 					$u['advance'] = ['total' => round($advance, 2), 'complete' => $u['complete_months'] === 12,
 						'balance' => $u['complete_months'] === 12 ? round($advance - $u['cost'], 2) : null];
@@ -583,7 +649,15 @@ class EnergyService {
 			$eTs = (clone $start)->modify('+1 month')->getTimestamp();
 			if ($sTs < $first || $eTs > $last) { $out[] = ['usage' => null, 'cost' => null]; continue; }
 			$usage = $this->readings->consumption($type, $sTs, $eTs);
-			$out[] = ['usage' => $usage, 'cost' => $this->tariffs->cost($type, $usage, $start->format('Y-m-d'), 1.0)];
+			// Kosten abschnittsweise, damit Tarifwechsel mitten im Monat stimmen
+			$cost = 0.0;
+			foreach ($this->segments($type, $start, (clone $start)->modify('+1 month')) as [$a, $b]) {
+				$days = ($b->getTimestamp() - $a->getTimestamp()) / 86400;
+				$c = $this->tariffs->cost($type, $this->readings->consumption($type, $a->getTimestamp(), $b->getTimestamp()), $a->format('Y-m-d'), $days / (int) $a->format('t'));
+				if ($c === null) { $cost = null; break; }
+				$cost += $c;
+			}
+			$out[] = ['usage' => $usage, 'cost' => $cost === null ? null : round($cost, 2)];
 		}
 		return $out;
 	}

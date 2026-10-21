@@ -103,6 +103,24 @@ class TariffRepository {
 	 * Tarif, der an $date (Y-m-d) gültig ist, Preise in Euro.
 	 * Bei mehreren Treffern gewinnt der zuletzt begonnene.
 	 */
+	/**
+	 * Tage (Y-m-d), an denen sich für $type ein Tarif ändert: Beginn jedes
+	 * Tarifs und der Tag nach seinem Ende. Aufsteigend, ohne Duplikate.
+	 * @return string[]
+	 */
+	public function changeDates(string $type): array {
+		$dates = [];
+		foreach ($this->all() as $t) {
+			if ($t['utility_type'] !== $type) continue;
+			$dates[$t['valid_from']] = true;
+			if ($t['valid_to'] !== null) {
+				$dates[(new DateTime($t['valid_to']))->modify('+1 day')->format('Y-m-d')] = true;
+			}
+		}
+		ksort($dates);
+		return array_keys($dates);
+	}
+
 	/** Monatlicher Abschlag in Euro, der an $date gilt (0 = keiner hinterlegt). */
 	public function advanceAt(string $type, string $date): float {
 		$best = $this->best($type, $date);

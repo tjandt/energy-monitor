@@ -52,6 +52,9 @@ tests/run.php               Tests:  php tests/run.php   (SQLite in-memory, kein 
   Hinweis: Das Passwort geht im Klartext über die Leitung – bei Zugriff über das Heimnetz hinaus unbedingt HTTPS verwenden.
 * **Stromabschlag:** Im Tarif (nur Strom) lässt sich ein monatlicher Abschlag in Euro hinterlegen. Die Stromkachel zeigt die
   erwartete Nach-/Rückzahlung für das Abrechnungsjahr (Beginn: `billing_start_month` in `config.php`) und eine Abschlagsempfehlung.
-  Berechnung: Ist-Verbrauch + Prognose, je Monat zum gültigen Tarif, gegen die Summe der Abschläge.
+  Berechnung: Ist-Verbrauch + Prognose gegen die Summe der Abschläge. Tarif- und Abschlagswechsel im Jahr werden tagesgenau
+  berücksichtigt (das Jahr wird an Monatsgrenzen und Tarifwechseln in Abschnitte zerlegt, jeder mit seinem Arbeits-/Grundpreis);
+  jeder Abschlag zählt mit dem Betrag, der an seinem Fälligkeitstag (`advance_due_day`, Standard 1.) gilt. Eine Änderung zum
+  Stichtag legen Sie als neuen Tarif mit „Gültig von“ = Stichtag an (Preise können gleich bleiben).
 * **Jahresbericht (PDF):** Button „Bericht“ → Jahr wählen. Übersicht aller Zähler, je Zähler Monatsdiagramm und -tabelle mit
   Vorjahresvergleich, Kosten, Abschlagssaldo (Strom) und Witterungsbereinigung (Wärme). Nur vollständig erfasste Monate zählen.

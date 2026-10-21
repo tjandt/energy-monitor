@@ -182,10 +182,20 @@ class EnergyApp {
 		const nachzahlung = a.balance < 0;
 		const status = Math.abs(a.balance) < 1 ? 'ausgeglichen'
 			: `${nachzahlung ? 'Nachzahlung' : 'Guthaben'} ≈ <strong class="${nachzahlung ? 'bad' : 'good'}">${EM.fmtMoney(Math.abs(a.balance))}</strong>`;
-		const hint = a.suggested_monthly !== Math.round(a.advance_monthly)
-			? ` · Empfehlung: ${EM.fmtMoney(a.suggested_monthly)}/Monat` : '';
-		return `<div class="weather-adj" title="Abrechnungsjahr ${EM.fmtDate(a.period_start)} – ${EM.fmtDate(a.period_end)}: Summe der Abschläge ${EM.fmtMoney(a.advance_total)} gegen erwartete Kosten ${EM.fmtMoney(a.expected_cost)}">
-			💶 Abschlag ${EM.fmtMoney(a.advance_monthly)}/Monat: ${status}${hint}${a.tariff_missing ? ' (Tarif unvollständig)' : ''}
+
+		// geplante Änderung des Abschlags im Abrechnungsjahr ("ab 01.07.: 120 €")
+		const next = a.advance_next ? ` (ab ${EM.fmtDate(a.advance_next.from)}: ${EM.fmtMoney(a.advance_next.amount)})` : '';
+		// Empfehlung für die restlichen Zahlungen, nur wenn sie vom geplanten Abschlag abweicht
+		const planned = a.advance_next ? a.advance_next.amount : a.advance_monthly;
+		const hint = a.remaining_payments > 0 && Math.abs(a.suggested_monthly - planned) >= 1
+			? ` · Empfehlung für die restl. ${a.remaining_payments} Zahlungen: ${EM.fmtMoney(a.suggested_monthly)}/Monat` : '';
+
+		const changes = (a.advance_changes || []).map((c) => `ab ${EM.fmtDate(c.from)}: ${EM.fmtMoney(c.amount)}`).join('; ');
+		const title = `Abrechnungsjahr ${EM.fmtDate(a.period_start)} – ${EM.fmtDate(a.period_end)}: `
+			+ `Abschläge gesamt ${EM.fmtMoney(a.advance_total)} (bisher fällig ${EM.fmtMoney(a.advance_paid)}) gegen erwartete Kosten ${EM.fmtMoney(a.expected_cost)}`
+			+ (changes ? `. Änderungen: ${changes}` : '');
+		return `<div class="weather-adj" title="${EM.escape(title)}">
+			💶 Abschlag ${EM.fmtMoney(a.advance_monthly)}/Monat${next}: ${status}${hint}${a.tariff_missing ? ' (Tarif unvollständig)' : ''}
 		</div>`;
 	}
 

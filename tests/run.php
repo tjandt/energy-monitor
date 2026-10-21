@@ -281,7 +281,7 @@ if (is_array($adv)) {
 	near('Abschlag: Summe 12 × 90', $adv['advance_total'], 1080);
 	near('Abschlag: erwartete Kosten ≈ Jahr × 10 kWh × 0,30 € + 12 × 10 €', $adv['expected_cost'], $daysYear * 10 * 0.30 + 120, 25);
 	check('Abschlag: Nachzahlung (Saldo < 0)', $adv['balance'] < 0, (string) $adv['balance']);
-	near('Abschlag: Empfehlung ≈ Kosten/12 aufgerundet', $adv['suggested_monthly'], ceil($adv['expected_cost'] / 12), 0.01);
+	near('Abschlag: Empfehlung deckt den Rest (Kosten − bezahlt) / offene Zahlungen', $adv['suggested_monthly'], ceil(($adv['expected_cost'] - $adv['advance_paid']) / max(1, $adv['remaining_payments'])), 0.01);
 	check('Abschlag: bezahlt ≤ gesamt', $adv['advance_paid'] > 0 && $adv['advance_paid'] <= $adv['advance_total']);
 	check('Abschlag: in der Kachel enthalten', is_array($svc->getPeriodComparison('Strom', 'month')['advance']));
 	check('Abschlag: Wasser hat keinen', $svc->getPeriodComparison('Wasser', 'month')['advance'] === null);
@@ -334,6 +334,53 @@ check('PDF: 2 Seiten (Übersicht + Strom)', preg_match_all('#/Type /Page\b#', $p
 $pdfNow = (new YearReportPdf($repNow))->Output('S');
 check('PDF laufendes Jahr erzeugbar', str_starts_with($pdfNow, '%PDF-'));
 check('PDF ohne Daten erzeugbar', str_starts_with((new YearReportPdf((new EnergyService(newDb(), $config))->getYearReport($lastYear)))->Output('S'), '%PDF-'));
+
+// ---------------------------------------------------------------- Abschlag mit Tarif-/Abschlagswechsel im Jahr
+$Y = $thisYear;
+$pdo = newDb();
+$st = $pdo->prepare('INSERT INTO meter_readings (utility_type, reading_date, counter_value) VALUES (?,?,?)');
+$v = 0; $pdo->beginTransaction();
+for ($d = new DateTime(($Y - 2) . '-01-01'); $d <= new DateTime("$Y-03-15"); $d->modify('+1 day')) { $st->execute(['Strom', $d->format('Y-m-d 00:00:00'), $v]); $v += 10; }
+$pdo->commit();
+$svc = new EnergyService($pdo, $config);
+$svc->saveTariff(['utility_type' => 'Strom', 'valid_from' => ($Y - 2) . '-01-01', 'valid_to' => "$Y-06-30", 'price_per_unit' => '30', 'base_price_monthly' => '1000', 'advance_monthly' => '90']);
+$svc->saveTariff(['utility_type' => 'Strom', 'valid_from' => "$Y-07-01", 'price_per_unit' => '40', 'base_price_monthly' => '1000', 'advance_monthly' => '120']);
+$now = new DateTime("$Y-03-15 12:00");
+$daysY = (int) date('z', strtotime("$Y-12-31")) + 1;
+$daysH2 = 184; $daysH1 = $daysY - $daysH2;
+$a = $svc->advanceCheck('Strom', $now);
+near('Wechsel: Abschläge 6×90 + 6×120', $a['advance_total'], 1260);
+near('Wechsel: bis 15.3. bezahlt: 3 × 90', $a['advance_paid'], 270);
+near('Wechsel: 9 Zahlungen offen', $a['remaining_payments'], 9);
+near('Wechsel: erwartete Kosten (H1 × 0,30 + H2 × 0,40 + 12 × 10 €)', $a['expected_cost'], $daysH1 * 3 + $daysH2 * 4 + 120, 20);
+check('Wechsel: Änderung des Abschlags erkannt (01.07. → 120)', $a['advance_next'] === ['from' => "$Y-07-01", 'amount' => 120.0], json_encode($a['advance_next']));
+near('Wechsel: aktueller Abschlag 90', $a['advance_monthly'], 90);
+check('Wechsel: Nachzahlung zu erwarten', $a['balance'] < 0);
+// Stichtag mitten im Monat: Fälligkeitstag entscheidet, welcher Abschlag für den Monat gilt
+$pdo2 = newDb(); $st2 = $pdo2->prepare('INSERT INTO meter_readings (utility_type, reading_date, counter_value) VALUES (?,?,?)');
+$v = 0; $pdo2->beginTransaction();
+for ($d = new DateTime(($Y - 2) . '-01-01'); $d <= new DateTime("$Y-03-15"); $d->modify('+1 day')) { $st2->execute(['Strom', $d->format('Y-m-d 00:00:00'), $v]); $v += 10; }
+$pdo2->commit();
+$mid = new EnergyService($pdo2, $config);
+$mid->saveTariff(['utility_type' => 'Strom', 'valid_from' => ($Y - 2) . '-01-01', 'valid_to' => "$Y-06-14", 'price_per_unit' => '30', 'base_price_monthly' => '1000', 'advance_monthly' => '100']);
+$mid->saveTariff(['utility_type' => 'Strom', 'valid_from' => "$Y-06-15", 'price_per_unit' => '30', 'base_price_monthly' => '1000', 'advance_monthly' => '150']);
+$m1 = $mid->advanceCheck('Strom', $now);
+near('Stichtag 15.6., Fälligkeit am 1.: Juni noch alt → 5×100 + 7×150 − ... = 6×100 + 6×150', $m1['advance_total'], 1500);
+$cfgDue = $config; $cfgDue['utilities']['Strom']['advance_due_day'] = 20;
+$m2 = (new EnergyService($pdo2, $cfgDue))->advanceCheck('Strom', $now);
+near('Fälligkeit am 20.: Juni schon neu → 5×100 + 7×150', $m2['advance_total'], 1550);
+// Preisänderung mitten im Monat wird tagesgenau bewertet (Kosten ändern sich gegenüber durchgehend altem Preis)
+$pdo3 = newDb(); $st3 = $pdo3->prepare('INSERT INTO meter_readings (utility_type, reading_date, counter_value) VALUES (?,?,?)');
+$v = 0; $pdo3->beginTransaction();
+for ($d = new DateTime(($Y - 2) . '-01-01'); $d <= new DateTime("$Y-03-15"); $d->modify('+1 day')) { $st3->execute(['Strom', $d->format('Y-m-d 00:00:00'), $v]); $v += 10; }
+$pdo3->commit();
+$flat = new EnergyService($pdo3, $config);
+$flat->saveTariff(['utility_type' => 'Strom', 'valid_from' => ($Y - 2) . '-01-01', 'price_per_unit' => '30', 'base_price_monthly' => '1000', 'advance_monthly' => '100']);
+$costFlat = $flat->advanceCheck('Strom', $now)['expected_cost'];
+$flat->saveTariff(['utility_type' => 'Strom', 'valid_from' => "$Y-" . '07-11', 'price_per_unit' => '40', 'base_price_monthly' => '1000', 'advance_monthly' => '100']);
+$costStep = $flat->advanceCheck('Strom', $now)['expected_cost'];
+$daysAfter = (strtotime(($Y + 1) . '-01-01') - strtotime("$Y-07-11")) / 86400; // Tage ab 11.7. mit 0,40 statt 0,30
+near('Preisänderung am 11.7.: Mehrkosten = Tage × 10 kWh × 0,10 €', $costStep - $costFlat, $daysAfter * 10 * 0.10, 8);
 
 // ---------------------------------------------------------------- Auth
 $hash = password_hash('geheim', PASSWORD_DEFAULT);

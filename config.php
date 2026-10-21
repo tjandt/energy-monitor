@@ -77,6 +77,7 @@ return [
 			'is_heating' => false, // für Wetter-Overlay im Chart relevant
 			'advance'    => true,  // monatlicher Abschlag je Tarif (Wasser/Wärme laufen über die Nebenkosten)
 			'billing_start_month' => 1, // Beginn des Abrechnungsjahres (1 = Januar)
+			'advance_due_day' => 1,     // Tag im Monat, an dem der Abschlag fällig ist (1–28)
 			'color'      => '#FF9500',
 			'icon'       => 'bolt',
 		],
