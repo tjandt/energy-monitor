@@ -5,6 +5,7 @@ class EnergyApp {
 		this.state = {
 			selectedType: 'Strom',
 			dashboardGranularity: 'month', // week | month | year
+			dashboardOffset: 0,            // Perioden zurück (0 = aktuell)
 			chartView: 'timeline',         // timeline | years (Jahresvergleich)
 			cumulative: false,             // nur Jahresvergleich
 			chartPeriod: 'year',           // last_week | last_month | year | custom
@@ -60,7 +61,21 @@ class EnergyApp {
 			this.loadChart();
 		});
 
-		this.bindSegmented('dashGranularity', (v) => { this.state.dashboardGranularity = v; this.loadDashboard(); });
+		this.bindSegmented('dashGranularity', (v) => {
+			this.state.dashboardGranularity = v;
+			this.state.dashboardOffset = 0; // Versatz gilt nur für die jeweilige Einheit
+			this.loadDashboard();
+		});
+		$('periodPrev').addEventListener('click', () => this.shiftPeriod(1));
+		$('periodNext').addEventListener('click', () => this.shiftPeriod(-1));
+		$('periodToday').addEventListener('click', () => { this.state.dashboardOffset = 0; this.loadDashboard(); });
+		document.addEventListener('keydown', (e) => {
+			// Pfeiltasten blättern, außer beim Tippen oder bei geöffnetem Dialog
+			if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+			if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+			if (e.target.closest('input, select, textarea, [contenteditable]') || document.querySelector('.modal-overlay.active')) return;
+			this.shiftPeriod(e.key === 'ArrowLeft' ? 1 : -1);
+		});
 		this.bindSegmented('chartView', (v) => {
 			this.state.chartView = v;
 			this.updateChartControls();
@@ -101,16 +116,38 @@ class EnergyApp {
 	// ------------------------------------------------------------------
 	// Dashboard (Kachel-Übersicht)
 	// ------------------------------------------------------------------
+	/** $delta > 0: weiter zurück, < 0: Richtung Gegenwart (nie darüber hinaus). */
+	shiftPeriod(delta) {
+		const next = Math.max(0, Math.min(this.maxBack ?? Infinity, this.state.dashboardOffset + delta));
+		if (next === this.state.dashboardOffset) return;
+		this.state.dashboardOffset = next;
+		this.loadDashboard();
+	}
+
+	updatePeriodNav(period) {
+		this.maxBack = period.max_back;
+		const $ = (id) => document.getElementById(id);
+		$('periodLabel').textContent = period.label;
+		$('periodPrev').disabled = period.offset >= period.max_back;
+		$('periodNext').disabled = period.offset <= 0;
+		$('periodToday').classList.toggle('d-none', period.offset <= 0);
+	}
+
 	async loadDashboard() {
 		const seq = ++this.seq.dashboard;
-		let data;
+		let res;
 		try {
-			data = await EM.api('get_dashboard', { params: { granularity: this.state.dashboardGranularity } });
+			res = await EM.api('get_dashboard', { params: {
+				granularity: this.state.dashboardGranularity,
+				offset: this.state.dashboardOffset,
+			} });
 		} catch (e) {
 			if (seq === this.seq.dashboard) EM.toast('Fehler beim Laden: ' + e.message);
 			return;
 		}
 		if (seq !== this.seq.dashboard) return;
+		const data = res.cards;
+		this.updatePeriodNav(res.period);
 
 		const granLabel = { week: 'Woche', month: 'Monat', year: 'Jahr' }[this.state.dashboardGranularity];
 		const grid = document.getElementById('dashboard');
@@ -132,6 +169,11 @@ class EnergyApp {
 				<div class="compare-value">${EM.fmt(c.value)} ${esc(item.unit)}</div>
 				${c.cost !== null ? `<div class="compare-value cost">${EM.fmtMoney(c.cost)}</div>` : ''}
 			</div>`).join('');
+		// zurückliegende, vollständig erfasste Perioden zeigen den Ist-Wert, sonst Prognose/Hochrechnung
+		const pct = Math.round(item.elapsed_fraction * 100);
+		const complete = item.is_past && pct >= 100;
+		const valueLabel = complete ? 'Verbrauch' : (item.is_past ? 'Hochgerechnet' : 'Prognose');
+		const coverage = complete ? '' : ` (${pct}% der Periode erfasst)`;
 		const trendRef = granLabel === 'Jahr' ? 'Vorjahr' : 'Vorjahres-' + granLabel;
 
 		return `
@@ -139,7 +181,7 @@ class EnergyApp {
 				<button class="add-fab" data-action="add" data-type="${esc(type)}" title="Zählerstand erfassen" aria-label="Zählerstand für ${esc(item.label)} erfassen">${icon('plus')}</button>
 				<div class="card-top">
 					<div>
-						<div class="card-title">${esc(item.label)}</div>
+						<div class="card-title">${esc(item.label)}${item.is_past ? '<span class="badge-past">Rückblick</span>' : ''}</div>
 						<div class="card-reading">${item.last_reading ? EM.fmt(item.last_reading.counter_value) : '–'} <span class="unit">${esc(item.unit)}</span></div>
 						<div class="card-date ${item.stale_warning ? 'stale' : ''}">${staleText}</div>
 					</div>
@@ -148,10 +190,10 @@ class EnergyApp {
 
 				<div class="trend-pill trend-${esc(item.trend)}"><span class="dot"></span>${this.trendText(item.trend)} ggü. ${trendRef}</div>
 
-				<div class="compare-label" style="margin-bottom:6px">${esc(item.current_label)} (${Math.round(item.elapsed_fraction * 100)}% der Periode erfasst)</div>
+				<div class="compare-label" style="margin-bottom:6px">${esc(item.current_label)}${coverage}</div>
 				<div class="compare-row">
 					<div class="compare-item">
-						<div class="compare-label">Prognose</div>
+						<div class="compare-label">${valueLabel}</div>
 						<div class="compare-value">${EM.fmt(item.estimate)} ${esc(item.unit)}</div>
 						${item.cost_estimate !== null ? `<div class="compare-value cost">${EM.fmtMoney(item.cost_estimate)}</div>` : ''}
 					</div>

@@ -382,6 +382,49 @@ $costStep = $flat->advanceCheck('Strom', $now)['expected_cost'];
 $daysAfter = (strtotime(($Y + 1) . '-01-01') - strtotime("$Y-07-11")) / 86400; // Tage ab 11.7. mit 0,40 statt 0,30
 near('Preisänderung am 11.7.: Mehrkosten = Tage × 10 kWh × 0,10 €', $costStep - $costFlat, $daysAfter * 10 * 0.10, 8);
 
+// ---------------------------------------------------------------- Zeitraum-Navigation im Dashboard
+$pdo = newDb();
+$st = $pdo->prepare('INSERT INTO meter_readings (utility_type, reading_date, counter_value) VALUES (?,?,?)');
+$v = 0; $pdo->beginTransaction();
+$navStart = (new DateTime('first day of january'))->modify('-2 year');
+for ($d = clone $navStart; $d <= new DateTime('now'); $d->modify('+1 day')) { $st->execute(['Strom', $d->format('Y-m-d 00:00:00'), $v]); $v += 10; }
+$pdo->commit();
+$svc = new EnergyService($pdo, $config);
+$navCur = $svc->getDashboard('month', 0)['Strom'];
+$navPrev = $svc->getDashboard('month', 1)['Strom'];
+check('Navigation: aktueller Monat ist Prognose', $navCur['is_past'] === false && str_starts_with($navCur['current_label'], 'Prognose'));
+$prevStart = (new DateTime('first day of this month'))->modify('-1 month');
+check('Navigation: Vormonat ist Ist-Wert', $navPrev['is_past'] === true && $navPrev['current_label'] === Period::label('month', $prevStart), $navPrev['current_label']);
+near('Navigation: Vormonat = Tage × 10 kWh', $navPrev['estimate'], 10 * (int) $prevStart->format('t'), 0.5);
+near('Navigation: Vormonat vollständig erfasst', $navPrev['elapsed_fraction'], 1.0, 0.001);
+check('Navigation: Vorjahreswerte beziehen sich auf den Vormonat', $navPrev['compare'][0]['label'] === Period::label('month', (clone $prevStart)->modify('-1 year')), $navPrev['compare'][0]['label']);
+near('Navigation: Vorjahresvergleich Vormonat', $navPrev['compare'][0]['value'], 10 * (int) (clone $prevStart)->modify('-1 year')->format('t'), 0.5);
+check('Navigation: Abschlag nur in laufender Periode', $navPrev['advance'] === null);
+check('Navigation: Vorjahr Trend', in_array($navPrev['trend'], ['good', 'bad', 'neutral'], true));
+$w1 = $svc->getDashboard('week', 1)['Strom'];
+near('Navigation: Vorwoche = 7 × 10 kWh', $w1['estimate'], 70, 0.5);
+$y1 = $svc->getDashboard('year', 1)['Strom'];
+near('Navigation: Vorjahr = Tage × 10 kWh', $y1['estimate'], 10 * (((int) date('Y') - 1) % 4 === 0 ? 366 : 365), 1);
+$nav0 = $svc->getPeriodNav('month', 0);
+check('Navigation: aktuell → nicht zurück springbar nach vorn', $nav0['is_current'] === true && $nav0['offset'] === 0);
+$monthsBack = ((int) date('Y') - (int) $navStart->format('Y')) * 12 + (int) date('n') - 1;
+check('Navigation: max_back bis zum ersten Zählerstand', $nav0['max_back'] === $monthsBack, json_encode($nav0));
+$nav1 = $svc->getPeriodNav('month', 1);
+check('Navigation: Beschriftung "Monat Jahr"', $nav1['label'] === ['', 'Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'][(int) $prevStart->format('n')] . ' ' . $prevStart->format('Y'), $nav1['label']);
+check('Navigation: Wochenbeschriftung', str_starts_with($svc->getPeriodNav('week', 1)['label'], 'KW '));
+throwsA('Navigation: negativer Versatz (Zukunft) abgelehnt', InvalidArgumentException::class, fn() => $svc->getDashboard('month', -1));
+throwsA('Navigation: Versatz zu groß', InvalidArgumentException::class, fn() => $svc->getPeriodNav('month', 5000));
+check('Navigation: weit zurück vor dem ersten Zählerstand ohne Fehler', is_array($svc->getDashboard('month', $monthsBack + 12)['Strom']));
+// Periode, die von den Ablesungen nur teilweise erreicht wird -> hochgerechnet
+$pdo = newDb(); $st = $pdo->prepare('INSERT INTO meter_readings (utility_type, reading_date, counter_value) VALUES (?,?,?)');
+$v = 0; $pdo->beginTransaction();
+$partialEnd = (new DateTime('first day of this month'))->modify('-1 month')->modify('+14 days'); // Mitte des Vormonats
+for ($d = (clone $navStart); $d <= $partialEnd; $d->modify('+1 day')) { $st->execute(['Strom', $d->format('Y-m-d 00:00:00'), $v]); $v += 10; }
+$pdo->commit();
+$part = (new EnergyService($pdo, $config))->getDashboard('month', 1)['Strom'];
+check('Navigation: teilweise erfasster Monat nicht als vollständig', $part['elapsed_fraction'] > 0.3 && $part['elapsed_fraction'] < 0.7, (string) $part['elapsed_fraction']);
+near('Navigation: teilweise erfasster Monat wird hochgerechnet (≈ Tage × 10)', $part['estimate'], 10 * (int) $prevStart->format('t'), 12);
+
 // ---------------------------------------------------------------- Auth
 $hash = password_hash('geheim', PASSWORD_DEFAULT);
 check('Auth: richtiges Passwort', Auth::verify('geheim', $hash));

@@ -5,6 +5,9 @@
 
 final class Period {
 
+	private const MONTHS_LONG = [1 => 'Januar', 2 => 'Februar', 3 => 'März', 4 => 'April', 5 => 'Mai', 6 => 'Juni',
+		7 => 'Juli', 8 => 'August', 9 => 'September', 10 => 'Oktober', 11 => 'November', 12 => 'Dezember'];
+
 	public const GRANULARITIES = ['week', 'month', 'year'];
 
 	private const MONTHS = [1 => 'Jan', 2 => 'Feb', 3 => 'Mär', 4 => 'Apr', 5 => 'Mai', 6 => 'Jun',
@@ -49,6 +52,39 @@ final class Period {
 			case 'month':
 			default:
 				return self::monthName((int) $date->format('n')) . ' ' . $date->format('Y');
+		}
+	}
+
+	/** Ausführliche Bezeichnung für die Zeitraum-Navigation ("Oktober 2026", "KW 43/2026 · 19.10.–25.10."). */
+	public static function longLabel(string $granularity, DateTimeInterface $date): string {
+		switch ($granularity) {
+			case 'week':
+				[$start, $end] = self::bounds('week', $date);
+				return 'KW ' . $start->format('W') . '/' . $start->format('o') . ' · '
+					. $start->format('d.m.') . '–' . (clone $end)->modify('-1 day')->format('d.m.');
+			case 'year':
+				return $date->format('Y');
+			case 'month':
+			default:
+				return self::MONTHS_LONG[(int) $date->format('n')] . ' ' . $date->format('Y');
+		}
+	}
+
+	/** Zeitraum-Beginn, $offset Perioden vor dem aktuellen. */
+	public static function startBack(string $granularity, int $offset, ?DateTimeInterface $now = null): DateTime {
+		[$start] = self::bounds($granularity, $now ?? new DateTime());
+		if ($offset > 0) $start->modify("-{$offset} " . $granularity);
+		return $start;
+	}
+
+	/** Anzahl Perioden zwischen $first (Zeitstempel) und der aktuellen Periode. */
+	public static function periodsBetween(string $granularity, int $firstTs, ?DateTimeInterface $now = null): int {
+		[$cur] = self::bounds($granularity, $now ?? new DateTime());
+		[$fst] = self::bounds($granularity, (new DateTime())->setTimestamp($firstTs));
+		switch ($granularity) {
+			case 'week': return max(0, (int) round(($cur->getTimestamp() - $fst->getTimestamp()) / (7 * 86400)));
+			case 'year': return max(0, (int) $cur->format('Y') - (int) $fst->format('Y'));
+			default: return max(0, ((int) $cur->format('Y') - (int) $fst->format('Y')) * 12 + (int) $cur->format('n') - (int) $fst->format('n'));
 		}
 	}
 

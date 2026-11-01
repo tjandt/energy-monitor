@@ -28,10 +28,10 @@ Auth::requirePage();
 			Energy Monitor
 		</div>
 		<div class="topbar-actions">
-			<a href="tariffs.php" class="btn btn-outline"><span class="label">Tarife</span></a>
+			<a href="tariffs.php" class="btn btn-outline" title="Tarife verwalten"><span id="tagIcon"></span><span class="label">Tarife</span></a>
 			<button id="reportBtn" class="btn btn-outline" title="Jahresbericht als PDF"><span id="reportIcon"></span><span class="label">Bericht</span></button>
 			<button id="readingsBtn" class="btn btn-outline" title="Zählerstände ansehen, ändern, löschen"><span id="listIcon"></span><span class="label">Zählerstände</span></button>
-			<button id="weatherBtn" class="btn btn-outline" title="Wetterdaten aktualisieren"><span class="label">Wetter&nbsp;Update</span></button>
+			<button id="weatherBtn" class="btn btn-outline" title="Wetterdaten aktualisieren"><span id="cloudIcon"></span><span class="label">Wetter&nbsp;Update</span></button>
 			<button id="addBtn" class="btn btn-primary"><span id="plusIcon"></span><span class="label">Zählerstand</span></button>
 			<?php if (Auth::enabled()): ?>
 			<form method="post" action="logout.php" style="margin:0"><button type="submit" class="btn btn-outline" title="Abmelden"><span id="logoutIcon"></span><span class="label">Abmelden</span></button></form>
@@ -45,10 +45,18 @@ Auth::requirePage();
 
 	<div class="controls-row">
 		<h1 class="section-title" style="margin:0">Übersicht</h1>
-		<div class="segmented" id="dashGranularity">
-			<button data-value="week">Woche</button>
-			<button data-value="month" class="active">Monat</button>
-			<button data-value="year">Jahr</button>
+		<div class="controls-right">
+			<div class="period-nav" role="group" aria-label="Zeitraum wählen">
+				<button type="button" id="periodPrev" class="icon-btn" title="Vorheriger Zeitraum" aria-label="Vorheriger Zeitraum"></button>
+				<span id="periodLabel" class="period-label" aria-live="polite">–</span>
+				<button type="button" id="periodNext" class="icon-btn" title="Nächster Zeitraum" aria-label="Nächster Zeitraum" disabled></button>
+				<button type="button" id="periodToday" class="btn-text d-none" title="Zurück zum aktuellen Zeitraum">Aktuell</button>
+			</div>
+			<div class="segmented" id="dashGranularity">
+				<button data-value="week">Woche</button>
+				<button data-value="month" class="active">Monat</button>
+				<button data-value="year">Jahr</button>
+			</div>
 		</div>
 	</div>
 
@@ -198,6 +206,10 @@ Auth::requirePage();
 	document.getElementById('modalClose').innerHTML = icon('close');
 	document.getElementById('readingsClose').innerHTML = icon('close');
 	document.getElementById('listIcon').innerHTML = icon('list');
+	document.getElementById('tagIcon').innerHTML = icon('tag');
+	document.getElementById('cloudIcon').innerHTML = icon('cloud');
+	document.getElementById('periodPrev').innerHTML = icon('back');
+	document.getElementById('periodNext').innerHTML = icon('forward');
 	document.getElementById('reportIcon').innerHTML = icon('file');
 	document.getElementById('reportClose').innerHTML = icon('close');
 	const lo = document.getElementById('logoutIcon'); if (lo) lo.innerHTML = icon('logout');

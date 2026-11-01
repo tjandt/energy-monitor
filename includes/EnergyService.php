@@ -79,28 +79,73 @@ class EnergyService {
 	// DASHBOARD
 	// =====================================================================
 
-	public function getDashboard(string $granularity = 'month'): array {
+	/**
+	 * Kacheln für die Periode, die $offset Perioden (Woche/Monat/Jahr) vor der
+	 * aktuellen liegt. offset 0 = laufende Periode mit Prognose; ältere
+	 * Perioden zeigen den tatsächlichen Verbrauch.
+	 */
+	public function getDashboard(string $granularity = 'month', int $offset = 0): array {
 		Period::assertValid($granularity);
+		$periodStart = $this->periodStartFor($granularity, $offset);
 		$result = [];
 		foreach ($this->getUtilityKeys() as $type) {
-			$result[$type] = $this->getPeriodComparison($type, $granularity);
+			$result[$type] = $this->getPeriodComparison($type, $granularity, $periodStart);
 		}
 		return $result;
 	}
 
-	/** Prognose der laufenden Periode inkl. Vergleich zu den letzten 2 Vorjahren. */
-	public function getPeriodComparison(string $type, string $granularity): array {
+	/** Angaben für die Zeitraum-Navigation (Beschriftung, wie weit man zurück kann). */
+	public function getPeriodNav(string $granularity = 'month', int $offset = 0): array {
+		Period::assertValid($granularity);
+		$start = Period::startBack($granularity, $this->checkOffset($offset));
+		$first = null;
+		foreach ($this->getUtilityKeys() as $type) {
+			$ts = $this->readings->firstTimestamp($type);
+			if ($ts !== null) $first = min($first ?? PHP_INT_MAX, $ts);
+		}
+		return [
+			'granularity' => $granularity,
+			'offset'      => $offset,
+			'label'       => Period::longLabel($granularity, $start),
+			'is_current'  => $offset === 0,
+			'max_back'    => $first === null ? 0 : Period::periodsBetween($granularity, $first),
+		];
+	}
+
+	private function checkOffset(int $offset): int {
+		if ($offset < 0 || $offset > 1200) {
+			throw new InvalidArgumentException('Ungültiger Zeitraum-Versatz (nur Gegenwart und Vergangenheit)');
+		}
+		return $offset;
+	}
+
+	/** null = laufende Periode, sonst Beginn der zurückliegenden Periode. */
+	private function periodStartFor(string $granularity, int $offset): ?DateTime {
+		return $this->checkOffset($offset) === 0 ? null : Period::startBack($granularity, $offset);
+	}
+
+	/**
+	 * Verbrauch/Prognose einer Periode inkl. Vergleich zu den letzten 2 Vorjahren.
+	 * $periodStart = null: laufende Periode (Prognose). Sonst eine zurückliegende
+	 * Periode: Ist-Verbrauch (nur wenn die Ablesungen das Periodenende nicht
+	 * erreichen, wird wie bei der Prognose hochgerechnet).
+	 */
+	public function getPeriodComparison(string $type, string $granularity, ?DateTimeInterface $periodStart = null): array {
 		$this->assertValidType($type);
 		Period::assertValid($granularity);
+		$isPast = $periodStart !== null;
 		$now = new DateTime();
+		$anchor = $isPast ? DateTime::createFromInterface($periodStart) : $now;
 		$meta = $this->utilities[$type];
 
-		$forecast = $this->forecaster->currentPeriod($type, $granularity, $now);
+		// Für zurückliegende Perioden "jetzt" = letzte Sekunde der Periode
+		$asOf = $isPast ? (clone Period::bounds($granularity, $anchor)[1])->modify('-1 second') : $now;
+		$forecast = $this->forecaster->currentPeriod($type, $granularity, $asOf);
 		$lastReading = $this->readings->last($type);
 
 		$compare = [];
 		for ($i = 1; $i <= 2; $i++) {
-			$refDate = (clone $now)->modify("-{$i} year");
+			$refDate = (clone $anchor)->modify("-{$i} year");
 			[$start, $end] = Period::bounds($granularity, $refDate);
 			$val = $this->readings->consumption($type, $start->getTimestamp(), $end->getTimestamp());
 			$compare[] = [
@@ -123,15 +168,16 @@ class EnergyService {
 			'stale_days'         => $staleDays,
 			'stale_warning'      => $staleDays !== null && $staleDays >= $this->cfg['warn_stale_days'],
 			'granularity'        => $granularity,
-			'current_label'      => 'Prognose ' . Period::label($granularity, $now),
+			'is_past'            => $isPast,
+			'current_label'      => ($isPast ? '' : 'Prognose ') . Period::label($granularity, $anchor),
 			'estimate'           => $forecast['estimate'],
 			'elapsed_fraction'   => $forecast['elapsed_fraction'],
 			'seasonal_reference' => $forecast['seasonal_reference'],
 			'compare'            => $compare,
 			'trend'              => $this->calcTrend($forecast['estimate'], $compare[0]['value']),
-			'weather_adjusted'   => $this->weatherAdjusted($type, $granularity, $now, $forecast),
-			'advance'            => !empty($meta['advance']) ? $this->advanceCheck($type) : null,
-			'cost_estimate'      => $this->periodCost($type, $forecast['estimate'], $now, $granularity),
+			'weather_adjusted'   => $this->weatherAdjusted($type, $granularity, $asOf, $forecast),
+			'advance'            => !$isPast && !empty($meta['advance']) ? $this->advanceCheck($type) : null,
+			'cost_estimate'      => $this->periodCost($type, $forecast['estimate'], $anchor, $granularity),
 		];
 	}
 
@@ -155,12 +201,16 @@ class EnergyService {
 	private function weatherAdjusted(string $type, string $granularity, DateTimeInterface $now, array $forecast): ?array {
 		if (empty($this->utilities[$type]['degree_day_adjust']) || $forecast['data_until'] === null) return null;
 
-		[$start] = Period::bounds($granularity, $now);
+		[$start, $end] = Period::bounds($granularity, $now);
 		$until = new DateTime($forecast['data_until']);
 		[$prevStart, $prevEnd] = Period::bounds($granularity, (clone $now)->modify('-1 year'));
 		$cut = (new DateTime())->setTimestamp((int) round(
 			$prevStart->getTimestamp() + $forecast['elapsed_fraction'] * ($prevEnd->getTimestamp() - $prevStart->getTimestamp())
 		));
+		if ($forecast['elapsed_fraction'] >= 0.999) { // vollständig erfasste Periode: ganze Tage vergleichen
+			$until = $end;
+			$cut = $prevEnd;
+		}
 
 		$gt = $this->degreeDays->between($start, $until);
 		$gtPrev = $this->degreeDays->between($prevStart, $cut);

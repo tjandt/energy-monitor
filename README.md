@@ -58,3 +58,7 @@ tests/run.php               Tests:  php tests/run.php   (SQLite in-memory, kein 
   Stichtag legen Sie als neuen Tarif mit „Gültig von“ = Stichtag an (Preise können gleich bleiben).
 * **Jahresbericht (PDF):** Button „Bericht“ → Jahr wählen. Übersicht aller Zähler, je Zähler Monatsdiagramm und -tabelle mit
   Vorjahresvergleich, Kosten, Abschlagssaldo (Strom) und Witterungsbereinigung (Wärme). Nur vollständig erfasste Monate zählen.
+* **Zeitraum-Navigation:** Die vier Kacheln zeigen standardmäßig den aktuellen Monat (Prognose). Mit den Pfeilen (oder den
+  Pfeiltasten ← →) blättern Sie Monate zurück – nie über den aktuellen hinaus –, „Aktuell“ springt zurück. Gleiches gilt für
+  Woche und Jahr. Zurückliegende Perioden zeigen den Ist-Verbrauch im Vergleich zu den zwei Vorjahren; reichen die Zählerstände
+  nicht bis zum Periodenende, wird hochgerechnet und das gekennzeichnet.

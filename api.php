@@ -48,7 +48,12 @@ try {
 	switch ($action) {
 
 		case 'get_dashboard':
-			respond($service->getDashboard(param($_GET, 'granularity', 'month')));
+			$granularity = param($_GET, 'granularity', 'month');
+			$offset = (int) param($_GET, 'offset', '0');
+			respond([
+				'cards'  => $service->getDashboard($granularity, $offset),
+				'period' => $service->getPeriodNav($granularity, $offset),
+			]);
 
 		case 'get_chart_data':
 			respond($service->getChartData(
