@@ -1,0 +1,3 @@
+# lokale Überschreibungen (DB-Zugangsdaten etc.)
+config.local.php
+.DS_Store

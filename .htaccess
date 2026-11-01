@@ -1,0 +1,5 @@
+# Apache 2.4: interne Dateien nicht direkt ausliefern
+<FilesMatch "^(config(\.local)?\.php|weather_import\.php|\.gitignore|README\.md)$">
+	Require all denied
+</FilesMatch>
+Options -Indexes

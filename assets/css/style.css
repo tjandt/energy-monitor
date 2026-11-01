@@ -525,3 +525,36 @@ tr.current-row td { color: var(--text); }
 	.grid { grid-template-columns: 1fr; }
 	.compare-row { flex-wrap: wrap; }
 }
+
+/* --------------------------------------------------------------------
+   Barrierefreiheit / Zustände
+   -------------------------------------------------------------------- */
+
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.card[role="button"] { cursor: pointer; }
+.btn:disabled, .btn-text:disabled { opacity: 0.5; cursor: not-allowed; }
+
+@media (prefers-reduced-motion: reduce) {
+	* { transition: none !important; animation: none !important; }
+}
+
+/* Zählerstände-Liste, Gradtage-Hinweis */
+.modal-box.wide { max-width: 560px; }
+.modal-scroll { max-height: 55vh; overflow-y: auto; }
+.modal-scroll th { position: sticky; top: 0; }
+.weather-adj { font-size: 12px; color: var(--text-secondary); margin: 10px 0 0; }
+.weather-adj strong.good { color: var(--good-text); }
+.weather-adj strong.bad { color: var(--bad-text); }
+
+/* Zeitraum-Navigation der Kacheln */
+.controls-right { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.period-nav { display: flex; align-items: center; gap: 6px; }
+.period-label { min-width: 150px; text-align: center; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.icon-btn:disabled:hover { background: var(--card); }
+.badge-past { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 980px; background: var(--neutral-bg); color: var(--neutral-text); font-size: 10px; font-weight: 700; letter-spacing: 0.3px; vertical-align: 1px; }
+@media (max-width: 640px) {
+	.controls-right { width: 100%; justify-content: space-between; }
+	.period-label { min-width: 0; flex: 1; }
+	.period-nav { flex: 1; }
+}

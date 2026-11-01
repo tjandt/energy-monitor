@@ -1,6 +1,10 @@
 <?php
 /**
  * api.php – Einziger Einstiegspunkt für alle AJAX-Aufrufe des Frontends.
+ *
+ * Schreibende Aktionen erfordern POST und den Header
+ * "X-Requested-With: XMLHttpRequest" (einfacher CSRF-Schutz: Fremdseiten
+ * können diesen Header nicht ohne CORS-Freigabe setzen).
  */
 
 declare(strict_types=1);
@@ -9,95 +13,131 @@ ini_set('display_errors', '0');
 ini_set('log_errors', '1');
 
 header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store');
 
 require_once __DIR__ . '/includes/EnergyService.php';
+require_once __DIR__ . '/includes/WeatherImporter.php';
+require_once __DIR__ . '/includes/Auth.php';
 
-$config = require __DIR__ . '/config.php';
-date_default_timezone_set($config['app']['timezone']);
-
-function respond(array $data, int $code = 200): void {
+function respond(array $data, int $code = 200): never {
 	http_response_code($code);
-	echo json_encode($data, JSON_UNESCAPED_UNICODE);
+	echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
 	exit;
 }
 
-function fail(string $message, int $code = 400): void {
-	respond(['success' => false, 'error' => $message], $code);
+function fail(string $message, int $code = 400, array $extra = []): never {
+	respond(['success' => false, 'error' => $message] + $extra, $code);
+}
+
+/** Skalarer String-Parameter (Arrays o.ä. aus ?x[]=1 werden ignoriert). */
+function param(array $source, string $key, ?string $default = null): ?string {
+	return isset($source[$key]) && is_string($source[$key]) ? $source[$key] : $default;
+}
+
+function requireWrite(): void {
+	if ($_SERVER['REQUEST_METHOD'] !== 'POST') fail('Nur POST erlaubt', 405);
+	if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') !== 'XMLHttpRequest') fail('Ungültige Anfrage', 403);
 }
 
 try {
+	Config::all(); // setzt auch die Zeitzone
+	Auth::requireApi();
 	$service = new EnergyService();
-	$action = $_GET['action'] ?? '';
-	$method = $_SERVER['REQUEST_METHOD'];
+	$action = param($_GET, 'action', '');
 
 	switch ($action) {
 
 		case 'get_dashboard':
-			$granularity = $_GET['granularity'] ?? 'month';
-			respond($service->getDashboard($granularity));
-			break;
+			$granularity = param($_GET, 'granularity', 'month');
+			$offset = (int) param($_GET, 'offset', '0');
+			respond([
+				'cards'  => $service->getDashboard($granularity, $offset),
+				'period' => $service->getPeriodNav($granularity, $offset),
+			]);
 
 		case 'get_chart_data':
-			$type = $_GET['type'] ?? '';
-			$period = $_GET['period'] ?? 'year';
-			$mode = $_GET['mode'] ?? 'usage';
-			$start = $_GET['start'] ?? null;
-			$end = $_GET['end'] ?? null;
-			$withForecast = ($_GET['forecast'] ?? '') === '1';
-			respond($service->getChartData($type, $period, $mode, $start, $end, $withForecast));
-			break;
+			respond($service->getChartData(
+				param($_GET, 'type', ''),
+				param($_GET, 'period', 'year'),
+				param($_GET, 'mode', 'usage'),
+				param($_GET, 'start'),
+				param($_GET, 'end'),
+				param($_GET, 'forecast') === '1'
+			));
 
 		case 'get_forecast':
-			$type = $_GET['type'] ?? '';
-			$months = isset($_GET['months']) ? (int) $_GET['months'] : null;
-			respond($service->getLongTermForecast($type, $months));
-			break;
+			$months = param($_GET, 'months');
+			respond($service->getLongTermForecast(param($_GET, 'type', ''), $months !== null ? (int) $months : null));
+
+		case 'get_year_comparison':
+			respond($service->getYearComparison(
+				param($_GET, 'type', ''),
+				param($_GET, 'mode', 'usage'),
+				param($_GET, 'cumulative') === '1'
+			));
+
+		case 'get_report_years':
+			respond(['years' => $service->getReportYears()]);
+
+		case 'get_readings':
+			respond($service->getReadings(
+				param($_GET, 'type', ''),
+				(int) param($_GET, 'limit', '50'),
+				(int) param($_GET, 'offset', '0')
+			));
+
+		case 'delete_reading':
+			requireWrite();
+			$id = (int) param($_POST, 'id', '0');
+			if ($id <= 0) fail('Ungültige ID');
+			$service->deleteReading($id);
+			respond(['success' => true]);
 
 		case 'save_reading':
-			if ($method !== 'POST') fail('Nur POST erlaubt', 405);
-			$service->saveReading(
-				$_POST['type'] ?? '',
-				$_POST['date'] ?? '',
-				$_POST['time'] ?? '',
-				$_POST['value'] ?? ''
-			);
+			requireWrite();
+			try {
+				$id = (int) param($_POST, 'id', '0');
+				$service->saveReading(
+					param($_POST, 'type', ''),
+					param($_POST, 'date', ''),
+					param($_POST, 'time', ''),
+					param($_POST, 'value', ''),
+					param($_POST, 'force') === '1',
+					$id > 0 ? $id : null
+				);
+			} catch (ImplausibleReadingException $e) {
+				fail($e->getMessage(), 409, ['needs_confirmation' => true]);
+			}
 			respond(['success' => true]);
-			break;
 
 		case 'get_tariffs':
-			respond(['tariffs' => $service->getTariffs()]);
-			break;
+			respond(['tariffs' => $service->getTariffs(), 'utilities' => $service->getUtilities()]);
 
 		case 'save_tariff':
-			if ($method !== 'POST') fail('Nur POST erlaubt', 405);
+			requireWrite();
 			$service->saveTariff($_POST);
 			respond(['success' => true]);
-			break;
 
 		case 'delete_tariff':
-			if ($method !== 'POST') fail('Nur POST erlaubt', 405);
-			$id = (int) ($_POST['id'] ?? 0);
-			if (!$id) fail('Ungültige ID');
+			requireWrite();
+			$id = (int) param($_POST, 'id', '0');
+			if ($id <= 0) fail('Ungültige ID');
 			$service->deleteTariff($id);
 			respond(['success' => true]);
-			break;
 
 		case 'import_weather':
-			// Delegiert an das dedizierte DWD-Import-Skript, damit dessen
-			// (potenziell langlaufende) Logik unabhängig testbar bleibt.
-			ob_start();
-			$_GET['inline'] = '1';
-			require __DIR__ . '/weather_import.php';
-			$output = ob_get_clean();
-			echo $output;
-			exit;
+			requireWrite();
+			$result = (new WeatherImporter())->run(param($_POST, 'station'), isset($_POST['from_year']) ? (int) $_POST['from_year'] : null);
+			respond($result, ($result['success'] ?? false) ? 200 : 502);
 
 		default:
-			fail('Unbekannte Aktion: ' . $action, 404);
+			fail('Unbekannte Aktion', 404);
 	}
 } catch (InvalidArgumentException $e) {
 	fail($e->getMessage(), 400);
+} catch (DatabaseUnavailableException $e) {
+	fail($e->getMessage(), 503);
 } catch (Throwable $e) {
-	error_log('API-Fehler: ' . $e->getMessage());
-	fail('Serverfehler: ' . $e->getMessage(), 500);
+	error_log('API-Fehler: ' . $e);
+	fail('Serverfehler – Details stehen im PHP-Error-Log.', 500);
 }

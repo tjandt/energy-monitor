@@ -6,9 +6,14 @@
  * die Werte im Abschnitt "db" und ggf. "weather" an die eigene Umgebung
  * anpassen.
  *
+ * Eigene Werte (v.a. Zugangsdaten) am besten in config.local.php ablegen:
+ * Die Datei ist in .gitignore eingetragen und überschreibt rekursiv die
+ * Werte hier, z.B.  <?php return ['db' => ['user' => '…', 'pass' => '…']];
+ *
  * SICHERHEITSHINWEIS: Diese Datei enthält Zugangsdaten im Klartext.
- * Stelle sicher, dass sie NICHT über den Webserver direkt aufrufbar ist
- * (z.B. per .htaccess "Deny from all" oder außerhalb des Document-Root).
+ * Die mitgelieferte .htaccess sperrt sie für den direkten Aufruf (Apache 2.4);
+ * bei nginx o.ä. bitte entsprechend selbst sperren. Die hier hinterlegten
+ * Standard-Zugangsdaten sind Beispielwerte aus der Entwicklung – Passwort ändern!
  * Da die App laut Anforderung nur im internen Heimnetz läuft, wurde bewusst
  * auf ein Login verzichtet – ein Basisschutz auf Webserver-Ebene
  * (z.B. per Reverse-Proxy/Firewall-Regel) wird trotzdem empfohlen.
@@ -40,12 +45,39 @@ return [
 		'growth_rate_clamp' => 0.30,
 	],
 
+	// Gradtage nach VDI 3807 (Gt20/15): je Tag mit Ø-Temperatur unter der
+	// Heizgrenze zählt (Raumtemperatur − Ø-Temperatur). Wird für die
+	// witterungsbereinigte Auswertung von Zählern mit 'degree_day_adjust' genutzt.
+	'degree_days' => [
+		'indoor_temp'  => 20,
+		'heating_limit' => 15,
+		// darunter ist der Zeitraum zu warm für eine aussagekräftige Bereinigung
+		'min_degree_days' => 15,
+		// mindestens dieser Anteil der Tage muss Wetterdaten haben
+		'min_coverage' => 0.8,
+	],
+
+	// Optionaler Passwortschutz (Standard: aus, App läuft im Heimnetz).
+	// Hash erzeugen:  php -r "echo password_hash('MeinPasswort', PASSWORD_DEFAULT), PHP_EOL;"
+	// und in config.local.php ablegen: ['auth' => ['enabled' => true, 'password_hash' => '$2y$…']]
+	'auth' => [
+		'enabled'       => false,
+		'password_hash' => '',
+		'session_hours' => 24 * 30,
+		// nach so vielen Fehlversuchen von einer IP wird für lockout_minutes gesperrt
+		'max_attempts'    => 5,
+		'lockout_minutes' => 10,
+	],
+
 	// Nur noch diese vier Zähler werden unterstützt (Gas wurde entfernt)
 	'utilities' => [
 		'Strom' => [
 			'label'      => 'Strom',
 			'unit'       => 'kWh',
 			'is_heating' => false, // für Wetter-Overlay im Chart relevant
+			'advance'    => true,  // monatlicher Abschlag je Tarif (Wasser/Wärme laufen über die Nebenkosten)
+			'billing_start_month' => 1, // Beginn des Abrechnungsjahres (1 = Januar)
+			'advance_due_day' => 1,     // Tag im Monat, an dem der Abschlag fällig ist (1–28)
 			'color'      => '#FF9500',
 			'icon'       => 'bolt',
 		],
@@ -67,6 +99,7 @@ return [
 			'label'      => 'Wärme',
 			'unit'       => 'kWh',
 			'is_heating' => true,
+			'degree_day_adjust' => true, // witterungsbereinigter Vorjahresvergleich
 			'color'      => '#AF52DE',
 			'icon'       => 'flame',
 		],
